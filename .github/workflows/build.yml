@@ -1,12 +1,16 @@
 Name: 每周自动编译 HINLINK H28K 固件
 
 on:
-  schedule:
-    - cron: '23 21 * * 0'
+  # 已关闭定时触发 schedule
   workflow_dispatch:
     inputs:
+      target_tag:
+        description: '指定固定源码 Tag (如 v23.05.3)'
+        required: true
+        default: 'v23.05.3'
+        type: string
       use_cache:
-        description: 使用 GitHub Actions 源码缓存
+        description: '使用 GitHub Actions 源码缓存'
         required: true
         default: true
         type: boolean
@@ -69,32 +73,20 @@ jobs:
             python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
             texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd jq time
 
-      - name: 选择最新正式版
+      - name: 解析编译版本
         id: release
         run: |
-          exec > >(tee -a "$GITHUB_WORKSPACE/logs/04_选择最新正式版.log") 2>&1
+          exec > >(tee -a "$GITHUB_WORKSPACE/logs/04_解析编译版本.log") 2>&1
           set -eu
-          UPSTREAM=https://github.com/immortalwrt/immortalwrt.git
-          RELEASE_TAG=""
-          for tag in $(git ls-remote --tags --refs "$UPSTREAM" 'refs/tags/v*' \
-            | awk -F/ '$3 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $3 }' \
-            | sort -Vr); do
-            version="${tag#v}"
-            buildinfo="https://downloads.immortalwrt.org/releases/${version}/targets/rockchip/armv8/config.buildinfo"
-            if curl -fsI "$buildinfo" >/dev/null; then
-              RELEASE_TAG="$tag"
-              break
-            fi
-          done
-          test -n "$RELEASE_TAG"
+          RELEASE_TAG="${{ inputs.target_tag }}"
           RELEASE_VERSION="${RELEASE_TAG#v}"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Latest stable release: $RELEASE_TAG"
+          echo "Target Release Tag: $RELEASE_TAG"
 
-      - name: 克隆正式版源码
+      - name: 克隆指定版本源码
         run: |
-          exec > >(tee -a "$GITHUB_WORKSPACE/logs/05_克隆正式版源码.log") 2>&1
+          exec > >(tee -a "$GITHUB_WORKSPACE/logs/05_克隆指定版本源码.log") 2>&1
           git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
             https://github.com/immortalwrt/immortalwrt.git source
           echo "=== Clone completed, disk space ==="
@@ -106,6 +98,7 @@ jobs:
           exec > >(tee -a "$GITHUB_WORKSPACE/logs/06_应用_HINLINK_H28K_补丁.log") 2>&1
           set -eu
           for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            [ -f "$patch" ] || continue
             echo "=== Applying patch: $(basename "$patch") ==="
             git apply --check --3way "$patch" || {
               echo "Patch check failed: $patch"
@@ -170,7 +163,7 @@ jobs:
 
       - name: 恢复源码缓存
         id: source-cache
-        if: ${{ github.event_name == 'schedule' || inputs.use_cache }}
+        if: ${{ inputs.use_cache }}
         uses: actions/cache/restore@v4
         with:
           path: source/dl
@@ -191,7 +184,7 @@ jobs:
           df -h / | tail -1
 
       - name: 保存源码缓存
-        if: ${{ (github.event_name == 'schedule' || inputs.use_cache) && steps.source-cache.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.use_cache && steps.source-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: source/dl
@@ -203,16 +196,17 @@ jobs:
         run: |
           echo "=== Build started at $(date) ==="
           
-          # 1. 多线程编译：只提取 Error/Warning/Make 节点日志，大幅缩减文件体积
+          # 修复管道退出码问题：使用 pipefail 正确捕获 make 的真实退出状态
+          set -o pipefail
+          
           echo "开始多线程并行编译..."
-          make -j$(nproc) 2>&1 | grep -iE 'error|warning|failed|make\[' > "$GITHUB_WORKSPACE/logs/11_编译固件_多线程摘要.log" || {
+          if ! make -j$(nproc) 2>&1 | tee "$GITHUB_WORKSPACE/logs/11_编译固件_多线程全量.log" | grep -iE 'error|warning|failed|make\[' > "$GITHUB_WORKSPACE/logs/11_编译固件_多线程摘要.log"; then
             echo "=========================================="
             echo "多线程编译失败，自动切换至单线程 (j=1 V=s) 定位真实错误..."
             echo "=========================================="
-            # 2. 仅在失败时触发：单线程输出精准报错到独立日志
             make -j1 V=s 2>&1 | tee "$GITHUB_WORKSPACE/logs/11_编译固件_单线程排查.log"
             exit 1
-          }
+          fi
 
           echo "=== Build finished successfully at $(date) ==="
 
@@ -299,4 +293,3 @@ jobs:
           else
             echo "Build status: ${{ job.status }}"
           fi
-
