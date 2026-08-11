@@ -1,7 +1,6 @@
 name: 每周自动编译 HINLINK H28K 固件
 
 on:
-  # 已关闭定时触发 schedule
   workflow_dispatch:
     inputs:
       target_tag:
@@ -28,12 +27,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 检出支持仓库
-        uses: actions/checkout@v4
-
       - name: 初始化日志目录
         run: |
           mkdir -p "$GITHUB_WORKSPACE/logs"
+
+      - name: 检出支持仓库
+        uses: actions/checkout@v4
 
       - name: 检查磁盘空间
         run: |
@@ -202,24 +201,33 @@ jobs:
         timeout-minutes: 300
         run: |
           LOG_FILE="$GITHUB_WORKSPACE/logs/编译固件.log"
-          echo "=== Build started at $(date) ==="
+          echo "=== Build started at $(date) ===" | tee -a "$LOG_FILE"
+          echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..." | tee -a "$LOG_FILE"
           
-          echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..."
-          if make -j"$(nproc)"; then
-            echo "=== 并行编译顺利完成 ==="
+          set +e
+          make -j"$(nproc)" 2>&1 | tee -a "$LOG_FILE"
+          BUILD_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ $BUILD_CODE -eq 0 ]; then
+            echo "=== 并行编译顺利完成 ===" | tee -a "$LOG_FILE"
           else
             echo "--------------------------------------------------" | tee -a "$LOG_FILE"
-            echo ">>> 多线程编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..." | tee -a "$LOG_FILE"
+            echo ">>> 阶段 1 编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..." | tee -a "$LOG_FILE"
             echo "--------------------------------------------------" | tee -a "$LOG_FILE"
             
+            set +e
             make -j1 V=s 2>&1 | tee -a "$LOG_FILE"
-            code=${PIPESTATUS[0]}
-            
-            echo "=== 编译彻底失败 at $(date), exit code: $code ===" | tee -a "$LOG_FILE"
-            exit "$code"
+            FAIL_CODE=${PIPESTATUS[0]}
+            set -e
+
+            echo "=== 编译彻底失败 at $(date), exit code: $FAIL_CODE ===" | tee -a "$LOG_FILE"
+            exit "$FAIL_CODE"
           fi
 
-          echo "=== Build finished successfully at $(date) ==="
+          echo "=== Build finished successfully at $(date) ===" | tee -a "$LOG_FILE"
+          echo "=== Disk space ===" | tee -a "$LOG_FILE"
+          df -h / | tail -1 | tee -a "$LOG_FILE"
 
       - name: 校验内核 ABI
         working-directory: source
