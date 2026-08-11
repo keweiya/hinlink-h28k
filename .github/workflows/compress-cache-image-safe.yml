@@ -1,0 +1,109 @@
+name: 全量无损压缩增量缓存镜像 (换名保存)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: '源镜像 Tag (如 v25.12.1)'
+        required: true
+        default: 'v25.12.1'
+        type: string
+      target_tag:
+        description: '压缩后保存的新镜像 Tag (如 v25.12.1-compressed)'
+        required: true
+        default: 'v25.12.1-compressed'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  compress-safe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      SRC_IMAGE: ghcr.io/${{ github.repository_owner }}/h28k-build-cache:${{ inputs.source_tag }}
+      NEW_IMAGE: ghcr.io/${{ github.repository_owner }}/h28k-build-cache:${{ inputs.target_tag }}
+
+    steps:
+      - name: 登录 GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉取原始旧镜像
+        run: |
+          echo "正在拉取源镜像: ${{ env.SRC_IMAGE }}"
+          docker pull ${{ env.SRC_IMAGE }}
+
+      - name: 容器内全量无损压缩与严格校验
+        run: |
+          echo "=== 阶段 1：启动交互式容器进行全量 Zstd 压缩 ==="
+          
+          docker run --name compress_worker ${{ env.SRC_IMAGE }} bash -c '
+            set -euo pipefail
+            echo ">>> 1.1 安装 zstd 打包工具..."
+            apt-get update -qq && apt-get install -y -qq zstd tar >/dev/null
+
+            echo ">>> 1.2 检查原始 /builder/source 完整占用..."
+            du -sh /builder/source
+
+            echo ">>> 1.3 开始全量无损压缩 (包含 .git, bin/, 日志及所有隐性目录)..."
+            # 不使用任何 --exclude，确保 100% 原始数据无损归档
+            tar --zstd -cf /builder/source_cache.tar.zst -C /builder/source .
+
+            echo ">>> 1.4 删除旧的展开解压目录 (为容器镜像腾出空间)..."
+            rm -rf /builder/source
+
+            echo ">>> 1.5 校验压缩包归档完整性 (CRC 校验)..."
+            tar --zstd -tf /builder/source_cache.tar.zst > /dev/null
+            echo "✅ 压缩文件无损坏！"
+          '
+
+      - name: 检查压缩产物与核心文件分布
+        run: |
+          echo "=== 阶段 2：数据核验 ==="
+          
+          echo ">>> 2.1 压缩包最终大小："
+          docker exec compress_worker du -sh /builder/source_cache.tar.zst
+
+          echo ">>> 2.2 验证 bin/ 产物与 .git 目录是否完好包含在压缩包中："
+          docker exec compress_worker bash -c '
+            echo "Checking .git..."
+            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./\.git/" | head -n 5 || true
+            
+            echo "Checking bin/..."
+            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./bin/" | head -n 5 || true
+            
+            echo "Checking tools/ & toolchain/..."
+            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./(tools|toolchain)/" | head -n 5 || true
+          '
+
+      - name: 保存并推送到新镜像 Tag
+        run: |
+          echo "=== 阶段 3：提交为新镜像，防止覆盖原镜像 ==="
+          
+          # 3.1 提交容器为新的镜像名称
+          docker commit compress_worker ${{ env.NEW_IMAGE }}
+
+          # 3.2 销毁工作容器
+          docker rm compress_worker
+
+          # 3.3 推送到新的 Tag，原镜像保持不动
+          echo "正在推送新镜像: ${{ env.NEW_IMAGE }}..."
+          docker push ${{ env.NEW_IMAGE }}
+          
+          echo "=================================================="
+          echo "✅ 全量压缩镜像已发布至: ${{ env.NEW_IMAGE }}"
+          echo "原镜像仍完好保存在: ${{ env.SRC_IMAGE }}"
+          echo "你可以分别拉取两个镜像对比测试！"
+          echo "=================================================="
+
+      - name: 清理 Runner 本地临时镜像
+        if: always()
+        run: |
+          docker system prune -af || true
