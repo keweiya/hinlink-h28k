@@ -1,4 +1,4 @@
-name: 全量无损压缩增量缓存镜像 (常驻容器 Exec 版)
+name: 全量无损压缩增量缓存镜像 (宿主机挂载压缩版)
 
 on:
   workflow_dispatch:
@@ -35,81 +35,98 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 拉取原始旧镜像
+      - name: 安装宿主机压缩工具
         run: |
-          echo "正在拉取源镜像: ${{ env.SRC_IMAGE }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd tar
+
+      - name: 拉取源镜像并导出数据到宿主机
+        run: |
+          set -euo pipefail
+          echo "=== 1.1 拉取源镜像: ${{ env.SRC_IMAGE }} ==="
           docker pull ${{ env.SRC_IMAGE }}
 
-      - name: 后台启动常驻工作容器
-        run: |
-          echo "=== 启动后台常驻容器 compress_worker ==="
-          # -d 后台运行，tail -f /dev/null 保持主进程不退出
-          docker run -d --name compress_worker ${{ env.SRC_IMAGE }} tail -f /dev/null
-
-      - name: 执行全量无损压缩 (Exec)
-        run: |
-          echo "=== 阶段 1：在常驻容器中进行全量 Zstd 压缩 ==="
-          docker exec compress_worker bash -c '
-            set -euo pipefail
-            echo ">>> 1.1 安装 zstd 打包工具..."
-            apt-get update -qq && apt-get install -y -qq zstd tar >/dev/null
-
-            echo ">>> 1.2 检查原始 /builder/source 完整占用..."
-            du -sh /builder/source
-
-            echo ">>> 1.3 开始全量无损压缩 (包含 .git, bin/, 日志及所有隐性目录)..."
-            tar --zstd -cf /builder/source_cache.tar.zst -C /builder/source .
-
-            echo ">>> 1.4 删除旧的展开解压目录 (为容器镜像腾出空间)..."
-            rm -rf /builder/source
-          '
-
-      - name: 数据核验与结构检查 (Exec)
-        run: |
-          echo "=== 阶段 2：数据核验 ==="
+          echo "=== 1.2 创建临时容器并导出 /builder/source 数据 ==="
+          mkdir -p "$GITHUB_WORKSPACE/host_build"
           
-          echo ">>> 2.1 压缩包最终大小："
-          docker exec compress_worker du -sh /builder/source_cache.tar.zst
+          # 创建一次性容器（不启动）
+          docker create --name extractor_container ${{ env.SRC_IMAGE }}
 
-          echo ">>> 2.2 验证 bin/ 产物与 .git 目录是否完好包含在压缩包中："
-          docker exec compress_worker bash -c '
-            echo "Checking .git..."
-            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./\.git/" | head -n 5 || true
-            
-            echo "Checking bin/..."
-            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./bin/" | head -n 5 || true
-            
-            echo "Checking tools/ & toolchain/..."
-            tar --zstd -tf /builder/source_cache.tar.zst | grep -E "^\./(tools|toolchain)/" | head -n 5 || true
-          '
+          # 将容器内的 /builder 目录完整复制到宿主机
+          echo ">>> 正在从容器复制文件到宿主机..."
+          docker cp extractor_container:/builder "$GITHUB_WORKSPACE/host_build/"
 
-      - name: 停止容器、提交并推送到新镜像 Tag
+          # 彻底销毁提取用的容器
+          docker rm extractor_container
+
+          echo "=== 1.3 检查宿主机上的原始数据大小 ==="
+          du -sh "$GITHUB_WORKSPACE/host_build/builder/source"
+
+      - name: 在宿主机上执行全量 Zstd 并发压缩
         run: |
-          echo "=== 阶段 3：停止容器、打包提交并推送 ==="
+          set -euo pipefail
+          echo "=== 2.1 开始在宿主机上使用多线程压缩 (zstd -T0) ==="
           
-          # 1. 停止常驻容器 (确保没有写入中的残留文件)
-          echo "停止工作容器..."
-          docker stop compress_worker
+          # 创建打包准备目录
+          mkdir -p "$GITHUB_WORKSPACE/docker_build_context/builder"
 
-          # 2. 将容器当前状态 commit 为新镜像
-          echo "提交容器变更存为新镜像: ${{ env.NEW_IMAGE }}..."
-          docker commit compress_worker ${{ env.NEW_IMAGE }}
+          # 利用宿主机多核 CPU (-T0) 极速打包压缩
+          tar --zstd -cf "$GITHUB_WORKSPACE/docker_build_context/builder/source_cache.tar.zst" \
+            -C "$GITHUB_WORKSPACE/host_build/builder/source" .
 
-          # 3. 彻底销毁工作容器
-          echo "清理工作容器..."
-          docker rm -f compress_worker
+          echo "=== 2.2 压缩包生成完成，核验大小 ==="
+          ls -lh "$GITHUB_WORKSPACE/docker_build_context/builder/source_cache.tar.zst"
+          du -sh "$GITHUB_WORKSPACE/docker_build_context/builder/source_cache.tar.zst"
 
-          # 4. 推送到 GHCR 仓库
+          echo "=== 2.3 清理宿主机展开的解压源数据（释放 Runner 磁盘空间） ==="
+          rm -rf "$GITHUB_WORKSPACE/host_build"
+
+      - name: 数据核验与结构检查
+        run: |
+          set -euo pipefail
+          TAR_FILE="$GITHUB_WORKSPACE/docker_build_context/builder/source_cache.tar.zst"
+          echo "=== 3.1 验证 bin/ 产物与 .git 目录是否完好包含在压缩包中 ==="
+          
+          echo "Checking .git..."
+          tar --zstd -tf "$TAR_FILE" | grep -E "^\./\.git/" | head -n 5 || true
+          
+          echo "Checking bin/..."
+          tar --zstd -tf "$TAR_FILE" | grep -E "^\./bin/" | head -n 5 || true
+          
+          echo "Checking tools/ & toolchain/..."
+          tar --zstd -tf "$TAR_FILE" | grep -E "^\./(tools|toolchain)/" | head -n 5 || true
+
+      - name: 基于 Dockerfile 重新构建纯净镜像 (单层 Flatten)
+        run: |
+          set -euo pipefail
+          echo "=== 4.1 生成 Dockerfile ==="
+          
+          # 制作基于基础镜像的干净构建环境，只复制压缩包，彻底摆脱 11G 旧层
+          cat << EOF > "$GITHUB_WORKSPACE/docker_build_context/Dockerfile"
+          FROM ${{ env.SRC_IMAGE }}
+          
+          # 删除镜像自带的原解压目录
+          RUN rm -rf /builder/source
+          
+          # 将压缩好的 source_cache.tar.zst 写入新层
+          COPY builder/source_cache.tar.zst /builder/source_cache.tar.zst
+          EOF
+
+          echo "=== 4.2 重新构建镜像 ==="
+          docker build -t ${{ env.NEW_IMAGE }} "$GITHUB_WORKSPACE/docker_build_context"
+
+      - name: 推送新镜像到 GHCR
+        run: |
+          set -euo pipefail
           echo "正在推送新镜像: ${{ env.NEW_IMAGE }}..."
           docker push ${{ env.NEW_IMAGE }}
-          
+
           echo "=================================================="
-          echo "✅ 全量压缩镜像已发布至: ${{ env.NEW_IMAGE }}"
-          echo "原镜像仍完好保存在: ${{ env.SRC_IMAGE }}"
+          echo "✅ 单层全量压缩镜像已发布至: ${{ env.NEW_IMAGE }}"
           echo "=================================================="
 
       - name: 清理 Runner 本地临时环境与镜像
         if: always()
         run: |
-          docker rm -f compress_worker 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/host_build" "$GITHUB_WORKSPACE/docker_build_context" 2>/dev/null || true
           docker system prune -af || true
