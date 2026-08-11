@@ -36,6 +36,7 @@ jobs:
 
       - name: 安装编译依赖
         run: |
+          set -euo pipefail
           {
             sudo apt-get update -qq
             sudo apt-get install -y -qq \
@@ -53,8 +54,8 @@ jobs:
       - name: 选择最新正式版
         id: release
         run: |
+          set -euo pipefail
           {
-            set -eu
             UPSTREAM=https://github.com/immortalwrt/immortalwrt.git
             RELEASE_TAG=""
             for tag in $(git ls-remote --tags --refs "$UPSTREAM" 'refs/tags/v*' \
@@ -76,6 +77,7 @@ jobs:
 
       - name: 克隆正式版源码
         run: |
+          set -euo pipefail
           {
             git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
               https://github.com/immortalwrt/immortalwrt.git source
@@ -86,8 +88,8 @@ jobs:
       - name: 应用 HINLINK H28K 补丁
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
               echo "=== Applying patch: $(basename "$patch") ==="
               git apply --check --3way "$patch" || {
@@ -107,8 +109,8 @@ jobs:
       - name: 更新 feeds
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             curl -fsSL \
               "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
               -o feeds.conf.default
@@ -121,8 +123,8 @@ jobs:
       - name: 应用构建配置
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
               . \
               "$GITHUB_WORKSPACE/config/firmware.conf" \
@@ -134,8 +136,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
           {
-            set -eu
             BUILDINFO_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VERSION}/targets/rockchip/armv8"
             curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
 
@@ -170,6 +172,7 @@ jobs:
         working-directory: source
         timeout-minutes: 90
         run: |
+          set -euo pipefail
           {
             make -j"$(nproc)" download V=s
             find dl -size -1024c -print -delete
@@ -192,21 +195,28 @@ jobs:
           LOG_FILE="$GITHUB_WORKSPACE/step_logs/编译固件.log"
           echo "=== Build started at $(date) ===" | tee -a "$LOG_FILE"
           
-          # 1. 先进行多线程全力编译（不带 V=s 避免刷屏，仅输出关键信息）
           echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..." | tee -a "$LOG_FILE"
-          if make -j"$(nproc)" 2>&1 | tee -a "$LOG_FILE"; then
+          
+          # 使用独立执行逻辑防止管道状态码被 tee 覆盖
+          set +e
+          make -j"$(nproc)" 2>&1 | tee -a "$LOG_FILE"
+          BUILD_CODE=${PIPESTATUS[0]}
+          set -e
+
+          if [ $BUILD_CODE -eq 0 ]; then
             echo "=== 并行编译顺利完成 ===" | tee -a "$LOG_FILE"
           else
             echo "--------------------------------------------------" | tee -a "$LOG_FILE"
             echo ">>> 阶段 1 编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..." | tee -a "$LOG_FILE"
             echo "--------------------------------------------------" | tee -a "$LOG_FILE"
             
-            # 2. 失败后使用单线程收集详细日志
+            set +e
             make -j1 V=s 2>&1 | tee -a "$LOG_FILE"
-            code=${PIPESTATUS[0]}
-            
-            echo "=== 编译彻底失败 at $(date), exit code: $code ===" | tee -a "$LOG_FILE"
-            exit "$code"
+            FAIL_CODE=${PIPESTATUS[0]}
+            set -e
+
+            echo "=== 编译彻底失败 at $(date), exit code: $FAIL_CODE ===" | tee -a "$LOG_FILE"
+            exit "$FAIL_CODE"
           fi
 
           echo "=== Build finished successfully at $(date) ===" | tee -a "$LOG_FILE"
@@ -219,8 +229,8 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
           {
-            set -eu
             bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
               . \
               "$GITHUB_WORKSPACE/config/firmware.conf" \
@@ -234,6 +244,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
+          set -euo pipefail
           {
             shopt -s nullglob
             FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
