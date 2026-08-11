@@ -1,4 +1,4 @@
-Name: 每周自动编译 HINLINK H28K 固件
+name: 每周自动编译 HINLINK H28K 固件
 
 on:
   # 已关闭定时触发 schedule
@@ -58,6 +58,7 @@ jobs:
 
       - name: 安装编译依赖
         run: |
+          set -euo pipefail
           {
             sudo apt-get update -qq
             sudo apt-get install -y -qq \
@@ -84,6 +85,7 @@ jobs:
 
       - name: 克隆指定版本源码
         run: |
+          set -euo pipefail
           {
             git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
               https://github.com/immortalwrt/immortalwrt.git source
@@ -94,8 +96,8 @@ jobs:
       - name: 应用 HINLINK H28K 补丁
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
               [ -f "$patch" ] || continue
               echo "=== Applying patch: $(basename "$patch") ==="
@@ -116,8 +118,8 @@ jobs:
       - name: 更新 feeds
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             curl -fsSL \
               "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
               -o feeds.conf.default
@@ -130,8 +132,8 @@ jobs:
       - name: 应用构建配置
         working-directory: source
         run: |
+          set -euo pipefail
           {
-            set -eu
             bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
               . \
               "$GITHUB_WORKSPACE/config/firmware.conf" \
@@ -143,8 +145,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
           {
-            set -eu
             BUILDINFO_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VERSION}/targets/rockchip/armv8"
             curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
 
@@ -179,6 +181,7 @@ jobs:
         working-directory: source
         timeout-minutes: 90
         run: |
+          set -euo pipefail
           {
             make -j"$(nproc)" download V=s
             find dl -size -1024c -print -delete
@@ -224,8 +227,8 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
           {
-            set -eu
             bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
               . \
               "$GITHUB_WORKSPACE/config/firmware.conf" \
@@ -239,6 +242,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
+          set -euo pipefail
           {
             shopt -s nullglob
             FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
