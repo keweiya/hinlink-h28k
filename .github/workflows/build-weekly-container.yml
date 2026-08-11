@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       target_tag:
-        description: '指定固定源码 Tag (如 v23.05.3)'
+        description: '指定固定源码 Tag (如 v25.12.1)'
         required: true
-        default: 'v23.05.3'
+        default: 'v25.12.1'
         type: string
       use_cache_image:
         description: '优先使用 GHCR 崩溃/中间态镜像续编译'
