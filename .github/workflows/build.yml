@@ -59,8 +59,13 @@ jobs:
         run: |
           set -euo pipefail
           {
+            # 禁用 needrestart 交互弹窗与服务重启引起的非 0 报错
+            export DEBIAN_FRONTEND=noninteractive
+            export NEEDRESTART_MODE=a
+            sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
+
             sudo apt-get update -qq
-            sudo apt-get install -y -qq \
+            sudo -E apt-get install -y -qq \
               ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
               bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
               gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
