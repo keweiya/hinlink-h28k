@@ -34,6 +34,11 @@ jobs:
       - name: 检出支持仓库
         uses: actions/checkout@v4
 
+      - name: 检查磁盘空间
+        run: |
+          echo "=== Initial disk space ==="
+          df -h /
+
       - name: 清理 Runner 磁盘空间
         run: |
           echo "=== Before cleanup ==="
@@ -75,7 +80,7 @@ jobs:
             echo "ℹ️ 用户选择跳过镜像缓存，本次进行全量编译。"
           fi
 
-      - name: 安装编译依赖 (Host)
+      - name: 安装编译依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -116,7 +121,7 @@ jobs:
           echo "=== Clone completed, disk space ==="
           df -h / | tail -1
 
-      - name: 同步最新的补丁与配置文件 (适配增量)
+      - name: 应用 HINLINK H28K 补丁
         working-directory: source
         run: |
           set -eu
@@ -133,16 +138,35 @@ jobs:
           done
           
           if [ -f "include/feeds.mk" ]; then
+            test "$(grep -c 'CONFIG_BUILDBOT' include/feeds.mk)" -eq 2 || true
             sed -i 's/CONFIG_BUILDBOT/CONFIG_ALL_KMODS/g' include/feeds.mk || true
           fi
+          git diff --stat || true
 
+      # 关键修正点：必须先更新并安装 feeds，创建出 ./feeds/luci/... 路径
+      - name: 更新 feeds
+        working-directory: source
+        run: |
+          set -eu
+          curl -fsSL \
+            "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
+            -o feeds.conf.default
+          sha256sum feeds.conf.default > .feeds.conf.default.sha256
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          sha256sum -c .feeds.conf.default.sha256
+
+      # 关键修正点：在 feeds 存在的前提下，安全应用配置修改
+      - name: 应用构建配置
+        working-directory: source
+        run: |
+          set -eu
           bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
             . \
             "$GITHUB_WORKSPACE/config/firmware.conf" \
             "$GITHUB_WORKSPACE/config/packages.conf"
 
-      - name: 提取官方内核配置 (全量构建时执行)
-        if: steps.check-image.outputs.FOUND_IMAGE != 'true'
+      - name: 提取官方内核配置
         working-directory: source
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
@@ -158,6 +182,9 @@ jobs:
               $0 !~ /^CONFIG_KERNEL_BUILD_(DOMAIN|USER)=/) ||
             /^# CONFIG_KERNEL_[A-Za-z0-9_]+ is not set$/
           ' .config.buildinfo > .config.official
+
+          grep -q '^CONFIG_ALL_KMODS=y$' .config.official
+          grep -q '^CONFIG_DEVEL=y$' .config.official
 
           cat .config.official \
             "$GITHUB_WORKSPACE/config/hinlink-h28k.config" > .config
@@ -196,10 +223,11 @@ jobs:
 
           echo "=== Build finished successfully at $(date) ==="
 
-      - name: 保存并推送增量编译镜像 (覆盖当前版本 Tag)
+      # 不论编译成功或失败，都在此保存打包并推送最新的编译环境状态
+      - name: 保存并推送编译容器镜像
         if: always() && steps.build-step.conclusion != 'skipped'
         run: |
-          echo "正在将本次编译后的工作区状态打包进 Docker 镜像..."
+          echo "正在将当前编译工作区打包进镜像..."
           
           cat << 'EOF' > Dockerfile.cache
           FROM ubuntu:24.04
@@ -207,12 +235,10 @@ jobs:
           COPY source /builder/source
           EOF
 
-          echo "构建镜像: ${{ env.IMAGE_NAME }}..."
+          echo "构建并覆盖推送镜像: ${{ env.IMAGE_NAME }}..."
           docker build -f Dockerfile.cache -t ${{ env.IMAGE_NAME }} .
-
-          echo "推送并覆盖更新镜像仓库..."
           docker push ${{ env.IMAGE_NAME }}
-          echo "✅ 镜像推送完成！"
+          echo "✅ 编译环境镜像已成功保存并同步至 GHCR。"
 
       - name: 校验内核 ABI
         working-directory: source
