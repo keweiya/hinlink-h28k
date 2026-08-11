@@ -1,0 +1,23 @@
+# HINLINK H28K 固件软件包列表
+#
+# 这个文件只用于“使用 ImageBuilder 生成固件”。
+# 每行一个包名，空行和 # 注释会被忽略。
+# kmod-* 会从 ImageBuilder 配置的软件源安装；前提是 ImageBuilder 的 kernel ABI
+# 与 ImmortalWrt 官方 rockchip/armv8 ABI 一致。
+
+luci-app-nikki
+luci-theme-design
+luci-theme-fluent
+wpad-openssl
+openssh-sftp-server
+wireless-regdb
+kmod-mt7921u
+kmod-rtl8812au-ct
+kmod-rtl8821cu
+kmod-rtl88x2bu
+kmod-rtl8192cu
+kmod-rtl8188eu
+kmod-mt7601u
+kmod-mt76x2u
+rtl8192cu-firmware
+rtl8821cu-firmware

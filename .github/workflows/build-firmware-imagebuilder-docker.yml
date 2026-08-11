@@ -1,0 +1,227 @@
+name: 使用 H28K ImageBuilder Docker 构建固件
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'ImmortalWrt release tag'
+        required: true
+        default: 'v25.12.1'
+        type: choice
+        options:
+          - v25.12.1
+          - v25.12.0
+          - v24.10.6
+          - v24.10.5
+          - v24.10.4
+          - v24.10.3
+          - v24.10.2
+          - v24.10.1
+          - v24.10.0
+      ib_strategy:
+        description: '要使用的 ImageBuilder Docker 策略 tag 后缀'
+        required: true
+        default: 'official-buildinfo-full'
+        type: choice
+        options:
+          - official-buildinfo-full
+          - official-buildbot-kernel-ib
+          - kernel-strict
+      extra_packages:
+        description: '额外追加的软件包，空格分隔；可留空'
+        required: false
+        default: ''
+        type: string
+      rootfs_partsize:
+        description: 'RootFS 分区大小，单位 MiB；留空则使用 ImageBuilder/官方默认值'
+        required: false
+        default: ''
+        type: string
+      upload_release:
+        description: '发布到 GitHub Release'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: h28k-firmware-imagebuilder-${{ github.ref }}-${{ inputs.target_tag }}-${{ inputs.ib_strategy }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-imagebuilder:${{ inputs.target_tag }}-${{ inputs.ib_strategy }}
+
+    steps:
+      - name: 检出 H28K 支持仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 release 信息
+        id: release
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.target_tag }}'
+          VERSION="${TAG#v}"
+          BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/rockchip/armv8"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "date=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+          echo "base_url=${BASE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: 读取官方 kernel ABI
+        id: official
+        run: |
+          set -euo pipefail
+          BASE_URL='${{ steps.release.outputs.base_url }}'
+          curl -fsSL "$BASE_URL/profiles.json" -o /tmp/profiles.json
+          curl -fsSL "$BASE_URL/packages/index.json" -o /tmp/index.json
+          official_abi_from_profiles="$(jq -r '.linux_kernel.vermagic // empty' /tmp/profiles.json)"
+          official_kernel="$(jq -r '.packages.kernel' /tmp/index.json)"
+          official_abi_from_index="$(sed -nE 's/.*~([0-9a-f]{32})-r[0-9]+/\1/p' <<< "$official_kernel")"
+          if [ -n "$official_abi_from_profiles" ]; then
+            official_abi="$official_abi_from_profiles"
+          else
+            official_abi="$official_abi_from_index"
+          fi
+          test -n "$official_abi"
+          if [ -n "$official_abi_from_index" ] && [ "$official_abi" != "$official_abi_from_index" ]; then
+            echo "profiles.json ABI differs from index.json ABI" >&2
+            echo "profiles=$official_abi_from_profiles index=$official_abi_from_index" >&2
+            exit 1
+          fi
+          echo "official_kernel=$official_kernel"
+          echo "official_abi=$official_abi"
+          echo "official_kernel=$official_kernel" >> "$GITHUB_OUTPUT"
+          echo "official_abi=$official_abi" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉取 ImageBuilder Docker
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_NAME"
+
+      - name: 准备软件包列表和自定义 files
+        id: prepare
+        run: |
+          set -euo pipefail
+          mkdir -p output files/etc/uci-defaults
+          PACKAGES="$(grep -Ev '^[[:space:]]*(#|$)' config/h28k-firmware.packages | tr '\n' ' ' | xargs)"
+          EXTRA='${{ inputs.extra_packages }}'
+          PACKAGES="${PACKAGES} ${EXTRA}"
+          echo "packages=${PACKAGES}" >> "$GITHUB_OUTPUT"
+          echo '=== PACKAGES ==='
+          echo "$PACKAGES"
+
+          ROOTFS_PARTSIZE='${{ inputs.rootfs_partsize }}'
+          if [ -n "$ROOTFS_PARTSIZE" ] && ! grep -Eq '^[0-9]+$' <<< "$ROOTFS_PARTSIZE"; then
+            echo "rootfs_partsize must be empty or a positive integer MiB value: $ROOTFS_PARTSIZE" >&2
+            exit 1
+          fi
+          echo "rootfs_partsize=${ROOTFS_PARTSIZE}" >> "$GITHUB_OUTPUT"
+          if [ -n "$ROOTFS_PARTSIZE" ]; then
+            echo "ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE} MiB"
+          else
+            echo 'ROOTFS_PARTSIZE: use ImageBuilder/default official value'
+          fi
+
+          LAN_IP="$(sed -n 's/^lan_ip=//p' config/firmware.conf | tail -n1)"
+          DEFAULT_THEME="$(sed -n 's/^default_theme=//p' config/firmware.conf | tail -n1)"
+          cat > files/etc/uci-defaults/99-h28k-custom <<EOF
+          #!/bin/sh
+          set -e
+          [ -n "${LAN_IP}" ] && uci set network.lan.ipaddr='${LAN_IP}' || true
+          [ -n "${DEFAULT_THEME}" ] && uci set luci.main.mediaurlbase='/luci-static/${DEFAULT_THEME}' || true
+          uci commit network || true
+          uci commit luci || true
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-h28k-custom
+
+      - name: 校验 ImageBuilder metadata
+        run: |
+          set -euo pipefail
+          docker run --rm "$IMAGE_NAME" '
+            set -euo pipefail
+            test -f profiles.json
+            echo "=== ImageBuilder kernel ==="
+            jq -r .linux_kernel profiles.json
+            echo "=== H28K profile ==="
+            jq -e .profiles.hinlink_h28k profiles.json
+            make info PROFILE=hinlink_h28k
+          '
+
+      - name: 使用 ImageBuilder 构建 H28K 固件
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e PACKAGES='${{ steps.prepare.outputs.packages }}' \
+            -e ROOTFS_PARTSIZE='${{ steps.prepare.outputs.rootfs_partsize }}' \
+            -v "$GITHUB_WORKSPACE/output:/output" \
+            -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro" \
+            "$IMAGE_NAME" '
+              set -euo pipefail
+              echo "=== Build firmware with PACKAGES ==="
+              echo "$PACKAGES"
+              make_args=(image PROFILE=hinlink_h28k PACKAGES="$PACKAGES" FILES=files)
+              if [ -n "${ROOTFS_PARTSIZE:-}" ]; then
+                make_args+=(ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE")
+              fi
+              make "${make_args[@]}"
+              mkdir -p /output
+              cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
+              cp -av profiles.json /output/profiles.json
+              find /output -maxdepth 1 -type f -print
+            '
+
+      - name: 检查固件产物与 ABI
+        id: check
+        run: |
+          set -euo pipefail
+          echo '=== output ==='
+          ls -lh output
+          shopt -s nullglob
+          firmware=(output/*hinlink*h28k*sysupgrade.img.gz output/*hinlink_h28k*sysupgrade.img.gz)
+          if [ "${#firmware[@]}" -eq 0 ]; then
+            echo 'H28K sysupgrade firmware not found' >&2
+            exit 1
+          fi
+          ib_abi="$(jq -r '.linux_kernel.vermagic' output/profiles.json)"
+          official_abi='${{ steps.official.outputs.official_abi }}'
+          echo "official_kernel=${{ steps.official.outputs.official_kernel }}"
+          echo "official_abi=$official_abi"
+          echo "ib_abi=$ib_abi"
+          test "$ib_abi" = "$official_abi"
+          echo "abi=$ib_abi" >> "$GITHUB_OUTPUT"
+
+      - name: 上传固件 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HINLINK-H28K-${{ steps.release.outputs.tag }}-${{ inputs.ib_strategy }}-${{ steps.check.outputs.abi }}
+          path: output/*
+          retention-days: 30
+
+      - name: 发布固件 Release
+        if: ${{ inputs.upload_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: h28k-ib-${{ steps.release.outputs.tag }}-${{ inputs.ib_strategy }}-${{ steps.release.outputs.date }}
+          name: HINLINK H28K ImageBuilder 固件 ${{ steps.release.outputs.tag }} (${{ inputs.ib_strategy }})
+          body: |
+            - 上游版本：${{ steps.release.outputs.tag }}
+            - ImageBuilder 策略：${{ inputs.ib_strategy }}
+            - 官方 kernel：`${{ steps.official.outputs.official_kernel }}`
+            - Kernel ABI：`${{ steps.check.outputs.abi }}`
+          files: output/*
