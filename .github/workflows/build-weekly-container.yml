@@ -80,15 +80,15 @@ jobs:
             echo "ℹ️ 用户选择跳过镜像缓存，本次进行全量编译。"
           fi
 
-      - name: 安装编译依赖 (Host)
+      - name: 安装编译依赖
         run: |
           set -euo pipefail
           {
-            # 禁用 Ubuntu 24.04 的 needrestart 交互弹窗与自动重启引起的 1 退出码
-            export DEBIAN_FRONTEND=noninteractive
-            export NEEDRESTART_MODE=a
-            sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
+            # 1. 彻底卸载 needrestart，防止其在 CI 环境中扫描 Runner 进程并返回 1 退出码
+            sudo apt-get remove -y --purge needrestart || true
 
+            # 2. 自动化静默安装依赖
+            export DEBIAN_FRONTEND=noninteractive
             sudo apt-get update -qq
             sudo -E apt-get install -y -qq \
               ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
