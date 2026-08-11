@@ -22,10 +22,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 初始化日志目录
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/step_logs"
-
       - name: 检出支持仓库
         uses: actions/checkout@v4
 
@@ -36,127 +32,111 @@ jobs:
 
       - name: 安装编译依赖
         run: |
-          set -euo pipefail
-          {
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq \
-              ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-              bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
-              gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
-              lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-              libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
-              libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build openssl p7zip \
-              p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
-              python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
-              texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd jq time
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/安装编译依赖.log"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
+            gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
+            lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build openssl p7zip \
+            p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+            python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
+            texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd jq time
 
       - name: 选择最新正式版
         id: release
         run: |
-          set -euo pipefail
-          {
-            UPSTREAM=https://github.com/immortalwrt/immortalwrt.git
-            RELEASE_TAG=""
-            for tag in $(git ls-remote --tags --refs "$UPSTREAM" 'refs/tags/v*' \
-              | awk -F/ '$3 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $3 }' \
-              | sort -Vr); do
-              version="${tag#v}"
-              buildinfo="https://downloads.immortalwrt.org/releases/${version}/targets/rockchip/armv8/config.buildinfo"
-              if curl -fsI "$buildinfo" >/dev/null; then
-                RELEASE_TAG="$tag"
-                break
-              fi
-            done
-            test -n "$RELEASE_TAG"
-            RELEASE_VERSION="${RELEASE_TAG#v}"
-            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-            echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Latest stable release: $RELEASE_TAG"
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/选择最新正式版.log"
+          set -eu
+          UPSTREAM=https://github.com/immortalwrt/immortalwrt.git
+          RELEASE_TAG=""
+          for tag in $(git ls-remote --tags --refs "$UPSTREAM" 'refs/tags/v*' \
+            | awk -F/ '$3 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $3 }' \
+            | sort -Vr); do
+            version="${tag#v}"
+            buildinfo="https://downloads.immortalwrt.org/releases/${version}/targets/rockchip/armv8/config.buildinfo"
+            if curl -fsI "$buildinfo" >/dev/null; then
+              RELEASE_TAG="$tag"
+              break
+            fi
+          done
+          test -n "$RELEASE_TAG"
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Latest stable release: $RELEASE_TAG"
 
       - name: 克隆正式版源码
         run: |
-          set -euo pipefail
-          {
-            git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
-              https://github.com/immortalwrt/immortalwrt.git source
-            echo "=== Clone completed, disk space ==="
-            df -h / | tail -1
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/克隆正式版源码.log"
+          git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
+            https://github.com/immortalwrt/immortalwrt.git source
+          echo "=== Clone completed, disk space ==="
+          df -h / | tail -1
 
       - name: 应用 HINLINK H28K 补丁
         working-directory: source
         run: |
-          set -euo pipefail
-          {
-            for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
-              [ -f "$patch" ] || continue
-              echo "=== Applying patch: $(basename "$patch") ==="
-              git apply --check --3way "$patch" || {
-                echo "Patch check failed: $patch"
-                git apply --reject "$patch" || true
-                find . -name '*.rej' -print -exec cat {} \;
-                exit 1
-              }
-              git apply --3way "$patch"
-            done
-            test "$(grep -c 'CONFIG_BUILDBOT' include/feeds.mk)" -eq 2
-            sed -i 's/CONFIG_BUILDBOT/CONFIG_ALL_KMODS/g' include/feeds.mk
-            test "$(grep -c 'CONFIG_ALL_KMODS' include/feeds.mk)" -eq 2
-            git diff --stat
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/应用 HINLINK H28K 补丁.log"
+          set -eu
+          for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            [ -f "$patch" ] || continue
+            echo "=== Applying patch: $(basename "$patch") ==="
+            git apply --check --3way "$patch" || {
+              echo "Patch check failed: $patch"
+              git apply --reject "$patch" || true
+              find . -name '*.rej' -print -exec cat {} \;
+              exit 1
+            }
+            git apply --3way "$patch"
+          done
+          test "$(grep -c 'CONFIG_BUILDBOT' include/feeds.mk)" -eq 2
+          sed -i 's/CONFIG_BUILDBOT/CONFIG_ALL_KMODS/g' include/feeds.mk
+          test "$(grep -c 'CONFIG_ALL_KMODS' include/feeds.mk)" -eq 2
+          git diff --stat
 
       - name: 更新 feeds
         working-directory: source
         run: |
-          set -euo pipefail
-          {
-            curl -fsSL \
-              "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
-              -o feeds.conf.default
-            sha256sum feeds.conf.default > .feeds.conf.default.sha256
-            ./scripts/feeds update -a
-            ./scripts/feeds install -a
-            sha256sum -c .feeds.conf.default.sha256
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/更新 feeds.log"
+          set -eu
+          curl -fsSL \
+            "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
+            -o feeds.conf.default
+          sha256sum feeds.conf.default > .feeds.conf.default.sha256
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          sha256sum -c .feeds.conf.default.sha256
 
       - name: 应用构建配置
         working-directory: source
         run: |
-          set -euo pipefail
-          {
-            bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
-              . \
-              "$GITHUB_WORKSPACE/config/firmware.conf" \
-              "$GITHUB_WORKSPACE/config/packages.conf"
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/应用构建配置.log"
+          set -eu
+          bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
+            . \
+            "$GITHUB_WORKSPACE/config/firmware.conf" \
+            "$GITHUB_WORKSPACE/config/packages.conf"
 
       - name: 提取官方内核配置
         working-directory: source
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          set -euo pipefail
-          {
-            BUILDINFO_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VERSION}/targets/rockchip/armv8"
-            curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
+          set -eu
+          BUILDINFO_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VERSION}/targets/rockchip/armv8"
+          curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
 
-            awk '
-              /^CONFIG_ALL_KMODS=y$/ ||
-              /^CONFIG_DEVEL=y$/ ||
-              (/^CONFIG_KERNEL_[A-Za-z0-9_]+=/ &&
-                $0 !~ /^CONFIG_KERNEL_BUILD_(DOMAIN|USER)=/) ||
-              /^# CONFIG_KERNEL_[A-Za-z0-9_]+ is not set$/
-            ' .config.buildinfo > .config.official
+          awk '
+            /^CONFIG_ALL_KMODS=y$/ ||
+            /^CONFIG_DEVEL=y$/ ||
+            (/^CONFIG_KERNEL_[A-Za-z0-9_]+=/ &&
+              $0 !~ /^CONFIG_KERNEL_BUILD_(DOMAIN|USER)=/) ||
+            /^# CONFIG_KERNEL_[A-Za-z0-9_]+ is not set$/
+          ' .config.buildinfo > .config.official
 
-            grep -q '^CONFIG_ALL_KMODS=y$' .config.official
-            grep -q '^CONFIG_DEVEL=y$' .config.official
+          grep -q '^CONFIG_ALL_KMODS=y$' .config.official
+          grep -q '^CONFIG_DEVEL=y$' .config.official
 
-            cat .config.official \
-              "$GITHUB_WORKSPACE/config/hinlink-h28k.config" > .config
-            make defconfig
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/提取官方内核配置.log"
+          cat .config.official \
+            "$GITHUB_WORKSPACE/config/hinlink-h28k.config" > .config
+          make defconfig
 
       - name: 恢复源码缓存
         id: source-cache
@@ -173,14 +153,11 @@ jobs:
         working-directory: source
         timeout-minutes: 90
         run: |
-          set -euo pipefail
-          {
-            make -j"$(nproc)" download V=s
-            find dl -size -1024c -print -delete
-            du -sh dl
-            echo "=== Download completed, disk space ==="
-            df -h / | tail -1
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/下载源码包.log"
+          make -j"$(nproc)" download V=s
+          find dl -size -1024c -print -delete
+          du -sh dl
+          echo "=== Download completed, disk space ==="
+          df -h / | tail -1
 
       - name: 保存源码缓存
         if: ${{ (github.event_name == 'schedule' || inputs.use_cache) && steps.source-cache.outputs.cache-hit != 'true' }}
@@ -193,34 +170,29 @@ jobs:
         working-directory: source
         timeout-minutes: 300
         run: |
-          LOG_FILE="$GITHUB_WORKSPACE/step_logs/编译固件.log"
-          echo "=== Build started at $(date) ===" | tee -a "$LOG_FILE"
-          echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..." | tee -a "$LOG_FILE"
+          echo "=== Build started at $(date) ==="
+          echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..."
           
-          set +e
-          make -j"$(nproc)" 2>&1 | tee -a "$LOG_FILE"
-          BUILD_CODE=${PIPESTATUS[0]}
-          set -e
+          # 1. 执行多线程全力编译并记录输出
+          make -j"$(nproc)" 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
 
-          if [ $BUILD_CODE -eq 0 ]; then
-            echo "=== 并行编译顺利完成 ===" | tee -a "$LOG_FILE"
-          else
-            echo "--------------------------------------------------" | tee -a "$LOG_FILE"
-            echo ">>> 阶段 1 编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..." | tee -a "$LOG_FILE"
-            echo "--------------------------------------------------" | tee -a "$LOG_FILE"
+          # 2. 判断多线程结果，失败则自动切换为单线程排查
+          if [ "$code" -ne 0 ]; then
+            echo "--------------------------------------------------"
+            echo ">>> 多线程编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..."
+            echo "--------------------------------------------------"
             
-            set +e
-            make -j1 V=s 2>&1 | tee -a "$LOG_FILE"
-            FAIL_CODE=${PIPESTATUS[0]}
-            set -e
-
-            echo "=== 编译彻底失败 at $(date), exit code: $FAIL_CODE ===" | tee -a "$LOG_FILE"
-            exit "$FAIL_CODE"
+            make -j1 V=s 2>&1 | tee build_singlethread.log
+            code=${PIPESTATUS[0]}
+            
+            echo "=== 编译彻底失败 at $(date), exit code: $code ==="
+            exit "$code"
           fi
 
-          echo "=== Build finished successfully at $(date) ===" | tee -a "$LOG_FILE"
-          echo "=== Disk space ===" | tee -a "$LOG_FILE"
-          df -h / | tail -1 | tee -a "$LOG_FILE"
+          echo "=== Build finished successfully at $(date) ==="
+          echo "=== Disk space ==="
+          df -h / | tail -1
 
       - name: 校验内核 ABI
         working-directory: source
@@ -228,37 +200,32 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          set -euo pipefail
-          {
-            bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
-              . \
-              "$GITHUB_WORKSPACE/config/firmware.conf" \
-              "$RELEASE_VERSION" \
-              "$RELEASE_TAG" \
-              "$GITHUB_ENV"
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/校验内核 ABI.log"
+          set -eu
+          bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
+            . \
+            "$GITHUB_WORKSPACE/config/firmware.conf" \
+            "$RELEASE_VERSION" \
+            "$RELEASE_TAG" \
+            "$GITHUB_ENV"
 
       - name: 检查固件产物
         working-directory: source
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          set -euo pipefail
-          {
-            shopt -s nullglob
-            FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
-            if [ "${#FIRMWARE_FILES[@]}" -eq 0 ]; then
-              echo "HINLINK H28K sysupgrade firmware not found"
-              ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
-              exit 1
-            fi
-            ls -lh "${FIRMWARE_FILES[@]}"
-            echo "BUILD_DATE=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_ENV"
-            echo "UPSTREAM_HASH=$(git log -1 --format='%h')" >> "$GITHUB_ENV"
-            echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-            sed -n 's/^lan_ip=/FIRMWARE_LAN_IP=/p; s/^password=/FIRMWARE_PASSWORD=/p' \
-              "$GITHUB_WORKSPACE/config/firmware.conf" >> "$GITHUB_ENV"
-          } 2>&1 | tee "$GITHUB_WORKSPACE/step_logs/检查固件产物.log"
+          shopt -s nullglob
+          FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
+          if [ "${#FIRMWARE_FILES[@]}" -eq 0 ]; then
+            echo "HINLINK H28K sysupgrade firmware not found"
+            ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
+            exit 1
+          fi
+          ls -lh "${FIRMWARE_FILES[@]}"
+          echo "BUILD_DATE=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_ENV"
+          echo "UPSTREAM_HASH=$(git log -1 --format='%h')" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          sed -n 's/^lan_ip=/FIRMWARE_LAN_IP=/p; s/^password=/FIRMWARE_PASSWORD=/p' \
+            "$GITHUB_WORKSPACE/config/firmware.conf" >> "$GITHUB_ENV"
 
       - name: 上传固件构件
         uses: actions/upload-artifact@v4
@@ -287,12 +254,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 打包上传关键步骤日志
-        if: always()
+      - name: 上传失败编译日志
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: 编译步骤日志
-          path: ${{ github.workspace }}/step_logs/*.log
+          name: 编译失败日志
+          path: |
+            source/build.log
+            source/build_singlethread.log
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: 报告构建结果
