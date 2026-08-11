@@ -1,22 +1,22 @@
-name: 容器化断点续编译 HINLINK H28K 固件
+name: 容器化增量编译 HINLINK H28K 固件
 
 on:
   workflow_dispatch:
     inputs:
       target_tag:
-        description: '指定固定源码 Tag (如 v25.12.1)'
+        description: '指定源码 Tag (如 v25.12.1)'
         required: true
         default: 'v25.12.1'
         type: string
       use_cache_image:
-        description: '优先使用 GHCR 崩溃/中间态镜像续编译'
+        description: '优先使用 GHCR 对应版本的增量镜像'
         required: true
         default: true
         type: boolean
 
 permissions:
   contents: write
-  packages: write # 必须开放 packages 写权限以 Push 镜像到 GHCR
+  packages: write # 必须开放 GHCR 镜像写入权限
 
 concurrency:
   group: build-hinlink-h28k-container
@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # 镜像命名：使用 GitHub 官方免费镜像仓库 (GHCR)
+      # 以输入的版本号 (例如 v25.12.1) 作为镜像 Tag，重复 push 会自动覆盖，不产生多余镜像
       IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-build-cache:${{ inputs.target_tag }}
 
     steps:
@@ -39,7 +39,7 @@ jobs:
       - name: 检出支持仓库
         uses: actions/checkout@v4
 
-      - name: 清理磁盘空间
+      - name: 清理 Runner 磁盘空间
         run: |
           echo "=== Before cleanup ==="
           df -h / | tail -1
@@ -55,37 +55,42 @@ jobs:
           echo "=== After cleanup ==="
           df -h / | tail -1
 
-      - name: 登录 GitHub Container Registry
+      - name: 登录 GitHub Container Registry (GHCR)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 检查远程断点镜像是否存在
+      - name: 检查是否存在对应版本的增量镜像
         id: check-image
         run: |
           set +e
           if [ "${{ inputs.use_cache_image }}" = "true" ]; then
-            echo "尝试拉取远程缓存镜像: ${{ env.IMAGE_NAME }}"
+            echo "尝试拉取对应版本的增量镜像: ${{ env.IMAGE_NAME }}"
             if docker pull ${{ env.IMAGE_NAME }}; then
               echo "FOUND_IMAGE=true" >> "$GITHUB_OUTPUT"
-              echo "成功找到远程中间态镜像！本次将基于该镜像继续增量编译。"
+              echo "✅ 成功匹配到版本 ${{ inputs.target_tag }} 的增量镜像！本次将进行增量编译。"
             else
               echo "FOUND_IMAGE=false" >> "$GITHUB_OUTPUT"
-              echo "未找到远程缓存镜像，本次将进行全量干净编译。"
+              echo "⚠️ 未找到版本 ${{ inputs.target_tag }} 的增量镜像，本次将进行全量编译。"
             fi
           else
             echo "FOUND_IMAGE=false" >> "$GITHUB_OUTPUT"
-            echo "用户选择跳过镜像缓存，本次进行全量干净编译。"
+            echo "ℹ️ 用户选择跳过镜像缓存，本次进行全量编译。"
           fi
 
       - name: 安装编译依赖 (Host)
         run: |
           set -euo pipefail
           {
+            # 禁用 Ubuntu 24.04 的 needrestart 交互弹窗与自动重启引起的 1 退出码
+            export DEBIAN_FRONTEND=noninteractive
+            export NEEDRESTART_MODE=a
+            sudo sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf 2>/dev/null || true
+
             sudo apt-get update -qq
-            sudo apt-get install -y -qq \
+            sudo -E apt-get install -y -qq \
               ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
               bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk \
               gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
@@ -107,19 +112,19 @@ jobs:
           echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "Target Release Tag: $RELEASE_TAG"
 
-      # 如果找到了断点镜像，直接提取镜像内的源码与中间产物状态
-      - name: 从镜像恢复断点环境
+      # 1. 如果存在增量镜像：直接提取镜像内的 source 工作区
+      - name: 还原增量编译工作区
         if: steps.check-image.outputs.FOUND_IMAGE == 'true'
         run: |
           set -euo pipefail
-          echo "正在从 Docker 镜像提取源码与编译中间态文件..."
+          echo "正在从 Docker 镜像提取上次编译的中间态文件..."
           CONTAINER_ID=$(docker create ${{ env.IMAGE_NAME }})
           docker cp "$CONTAINER_ID:/builder/source" "$GITHUB_WORKSPACE/source"
           docker rm "$CONTAINER_ID"
-          echo "断点环境恢复成功！"
+          echo "已成功还原增量工作区！"
 
-      # 如果没有镜像，则按照标准流程重新初始化与克隆
-      - name: 全量克隆指定版本源码
+      # 2. 如果不存在增量镜像：从 0 开始全量克隆
+      - name: 全量克隆源码
         if: steps.check-image.outputs.FOUND_IMAGE != 'true'
         run: |
           set -euo pipefail
@@ -130,12 +135,13 @@ jobs:
             df -h / | tail -1
           } 2>&1 | tee "$GITHUB_WORKSPACE/logs/克隆指定版本源码.log"
 
-      - name: 应用 HINLINK H28K 补丁与配置
+      # 3. 无论是增量还是全量，都重新更新/同步你最新提交的第三方插件、补丁和配置文件
+      - name: 同步最新的补丁与配置文件 (适配增量)
         working-directory: source
         run: |
           set -euo pipefail
           {
-            # 重新应用最新代码库中的补丁，确保你更新后的修改能作用到源码树中
+            # 重新应用最新 repository 里的补丁
             for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
               [ -f "$patch" ] || continue
               echo "=== Applying patch: $(basename "$patch") ==="
@@ -152,14 +158,14 @@ jobs:
               sed -i 's/CONFIG_BUILDBOT/CONFIG_ALL_KMODS/g' include/feeds.mk || true
             fi
 
-            # 更新/同步最新的 Config 和 Packages 配置
+            # 重新更新/安装 feeds（如果新增或删除了 package 目录，这里会自动同步）
             bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
               . \
               "$GITHUB_WORKSPACE/config/firmware.conf" \
               "$GITHUB_WORKSPACE/config/packages.conf"
           } 2>&1 | tee "$GITHUB_WORKSPACE/logs/应用构建配置.log"
 
-      - name: 提取官方内核配置 (全量模式才执行)
+      - name: 提取官方内核配置 (全量构建时执行)
         if: steps.check-image.outputs.FOUND_IMAGE != 'true'
         working-directory: source
         env:
@@ -221,31 +227,29 @@ jobs:
             set -e
 
             echo "=== 编译彻底失败 at $(date), exit code: $FAIL_CODE ===" | tee -a "$LOG_FILE"
-            echo "BUILD_FAILED=true" >> "$GITHUB_ENV"
             exit "$FAIL_CODE"
           fi
 
           echo "=== Build finished successfully at $(date) ===" | tee -a "$LOG_FILE"
 
-      # 关键步骤：编译失败时打包当前所有中间态产物并 Push 到 GHCR 镜像仓库
-      - name: 保存并推送失败状态镜像
-        if: failure() && env.BUILD_FAILED == 'true'
+      # 关键步骤：不论成功还是失败 (always())，都将最新的工作区状态打包覆盖推送至对应的 Tag
+      - name: 保存并推送增量编译镜像 (覆盖当前版本 Tag)
+        if: always() && steps.build-step.conclusion != 'skipped'
         run: |
-          echo "检测到编译失败，开始打包当前崩溃现场与中间产物..."
+          echo "正在将本次编译后的工作区状态打包进 Docker 镜像..."
           
-          # 创建临时 Dockerfile 包含整个工作区的源码、build_dir, staging_dir 和 dl
           cat << 'EOF' > Dockerfile.cache
           FROM ubuntu:24.04
           WORKDIR /builder
           COPY source /builder/source
           EOF
 
-          echo "正在构建断点 Docker 镜像..."
+          echo "构建镜像: ${{ env.IMAGE_NAME }}..."
           docker build -f Dockerfile.cache -t ${{ env.IMAGE_NAME }} .
 
-          echo "正在推送崩溃现场镜像到 GHCR 仓库..."
+          echo "推送并覆盖更新镜像仓库..."
           docker push ${{ env.IMAGE_NAME }}
-          echo "镜像推送完成！再次运行 Workflow 时将自动拉取此镜像并继续编译。"
+          echo "✅ 镜像推送完成！下次更新代码或编译相同 Tag (${{ inputs.target_tag }}) 时将直接进行秒级增量编译。"
 
       - name: 校验内核 ABI
         working-directory: source
@@ -284,13 +288,6 @@ jobs:
             sed -n 's/^lan_ip=/FIRMWARE_LAN_IP=/p; s/^password=/FIRMWARE_PASSWORD=/p' \
               "$GITHUB_WORKSPACE/config/firmware.conf" >> "$GITHUB_ENV"
           } 2>&1 | tee "$GITHUB_WORKSPACE/logs/检查固件产物.log"
-
-      # 如果本次编译成功了，说明该 Tag 的断点镜像已失效，清理/移除远程缓存镜像
-      - name: 编译成功后清理断点镜像
-        if: success() && steps.check-image.outputs.FOUND_IMAGE == 'true'
-        run: |
-          echo "固件已顺利编译完成！该版本的断点镜像已不需要。"
-          # 可选：如果你不需要清理可以留着，这里提供清除提示
 
       - name: 上传固件构件
         uses: actions/upload-artifact@v4
