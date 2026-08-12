@@ -36,7 +36,7 @@ on:
 
 permissions:
   contents: write
-  packages: write
+  packages: read
 
 concurrency:
   group: h28k-custom-imagebuilder-${{ github.ref }}-${{ inputs.target_tag }}
@@ -62,10 +62,9 @@ jobs:
         id: release
         run: |
           set -euo pipefail
-          TAG='${{ inputs.target_tag }}'
+          TAG="${{ inputs.target_tag }}"
           VERSION="${TAG#v}"
           
-          # 多源回退策略测试最佳镜像源
           MIRRORS=(
             "https://downloads.immortalwrt.org"
             "https://mirrors.ustc.edu.cn/immortalwrt"
@@ -104,9 +103,8 @@ jobs:
       - name: 下载官方 SDK 与 ImageBuilder，并本地编译第三方插件
         run: |
           set -euo pipefail
-          BASE_URL='${{ steps.release.outputs.base_url }}'
+          BASE_URL="${{ steps.release.outputs.base_url }}"
           
-          # 1. 下载 ImageBuilder 官方压缩包
           IB_FILENAME=$(grep -E 'immortalwrt-imagebuilder-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
           echo "下载 ImageBuilder: $IB_FILENAME"
           curl -fsSL "${BASE_URL}/${IB_FILENAME}" -o /tmp/ib.tar.xz
@@ -114,7 +112,6 @@ jobs:
           mkdir -p /tmp/imagebuilder
           tar -xf /tmp/ib.tar.xz --strip-components=1 -C /tmp/imagebuilder/
 
-          # 2. 下载 SDK 压缩包用于编译第三方包
           SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
           echo "下载 SDK: $SDK_FILENAME"
           curl -fsSL "${BASE_URL}/${SDK_FILENAME}" -o /tmp/sdk.tar.xz
@@ -122,7 +119,6 @@ jobs:
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk.tar.xz --strip-components=1 -C /tmp/sdk/
 
-          # 3. 克隆第三方源码包 (Nikki + Design 主题 + Fluent 主题)
           echo "=== 克隆第三方插件源码 ==="
           mkdir -p /tmp/sdk/package/custom
           git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/nikki
@@ -135,7 +131,6 @@ jobs:
             cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent
           fi
 
-          # 4. 在 SDK 中增量编译
           echo "=== 开始编译第三方包 ==="
           cd /tmp/sdk
           ./scripts/feeds update -i >/dev/null 2>&1 || true
@@ -150,16 +145,13 @@ jobs:
             make "package/custom/$pkg/compile" IGNORE_ERRORS=m -j$(nproc) || make "package/custom/$pkg/compile" IGNORE_ERRORS=m -j1 V=s
           done
 
-          # 5. 将编译出来的 .apk 注入到 ImageBuilder 的 packages 目录中
           echo "=== 注入编译产物到 ImageBuilder ==="
           mkdir -p /tmp/imagebuilder/packages
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} /tmp/imagebuilder/packages/ \;
 
-          # 6. 保存为自定义的 Docker 镜像并推送至 GHCR
           echo "=== 构建定制版 ImageBuilder Docker 镜像 ==="
           cd /tmp/imagebuilder
           
-          # 创建一个简易的 Dockerfile 封装该目录
           cat << 'EOF' > Dockerfile
           FROM alpine:latest
           RUN apk add --no-cache bash make perl tar gzip findutils coreutils diffutils wget python3
@@ -171,13 +163,13 @@ jobs:
           CUSTOM_IMAGE="ghcr.io/${{ github.repository_owner }}/h28k-custom-imagebuilder:${{ steps.release.outputs.version }}"
           docker build -t "$CUSTOM_IMAGE" .
           docker push "$CUSTOM_IMAGE"
-          echo "custom_image=$CUSTOM_IMAGE" >> $GITHUB_ENV
+          echo "CUSTOM_IMAGE=$CUSTOM_IMAGE" >> "$GITHUB_ENV"
 
       - name: 校验官方与自定义镜像的 Kernel ABI
         id: official
         run: |
           set -euo pipefail
-          BASE_URL='${{ steps.release.outputs.base_url }}'
+          BASE_URL="${{ steps.release.outputs.base_url }}"
           curl -fsSL "$BASE_URL/profiles.json" -o /tmp/profiles.json
           curl -fsSL "$BASE_URL/packages/index.json" -o /tmp/index.json
           
@@ -194,10 +186,8 @@ jobs:
           set -euo pipefail
           mkdir -p output files/etc/uci-defaults
           
-          # 组装 packages 列表（包含默认文件包 + 第三方插件 nikki、主题）
           PACKAGES="$(grep -Ev '^[[:space:]]*(#|$)' config/h28k-firmware.packages | tr '\n' ' ' | xargs)"
-          EXTRA="${{ inputs.extra_packages }}"
-          # 自动挂载刚刚编译好的第三方包
+          EXTRA="${{ inputs.extra_packages || '' }}"
           PACKAGES="${PACKAGES} ${EXTRA} nikki luci-theme-design luci-theme-fluent"
           
           echo "packages=${PACKAGES}" >> "$GITHUB_OUTPUT"
@@ -224,20 +214,28 @@ jobs:
           chmod +x files/etc/uci-defaults/99-h28k-custom
 
       - name: 使用自建镜像执行 ImageBuilder 打包 H28K 固件
+        env:
+          CUSTOM_IMAGE: ${{ env.CUSTOM_IMAGE }}
+          PACKAGES_INPUT: ${{ steps.prepare.outputs.packages }}
+          ROOTFS_SIZE_INPUT: ${{ steps.prepare.outputs.rootfs_partsize }}
+          WORKING_MIRROR_INPUT: ${{ steps.release.outputs.working_mirror }}
         run: |
           set -euo pipefail
           docker run --rm \
-            -e PACKAGES='${{ steps.prepare.outputs.packages }}' \
-            -e ROOTFS_PARTSIZE='${{ steps.prepare.outputs.rootfs_partsize }}' \
-            -e WORKING_MIRROR='${{ steps.release.outputs.working_mirror }}' \
+            -e PACKAGES="$PACKAGES_INPUT" \
+            -e ROOTFS_PARTSIZE="$ROOTFS_SIZE_INPUT" \
+            -e WORKING_MIRROR="$WORKING_MIRROR_INPUT" \
             -v "$GITHUB_WORKSPACE/output:/output" \
             -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro" \
-            "$custom_image" '
+            "$CUSTOM_IMAGE" bash -c '
               set -euo pipefail
               
-              # 替换软件源为当前测得最快的镜像源
               if [ -n "$WORKING_MIRROR" ] && [ -f repositories.conf ]; then
                 sed -i "s|https://downloads.immortalwrt.org|$WORKING_MIRROR|g" repositories.conf || true
+              fi
+
+              if [ -d packages/extra ]; then
+                cp -av packages/extra/* packages/ 2>/dev/null || true
               fi
 
               echo "=== 开始打包固件 ==="
@@ -248,7 +246,7 @@ jobs:
               cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
               cp -av bin/targets/rockchip/armv8/*rootfs*.tar.gz /output/ || true
               [ -f profiles.json ] && cp -av profiles.json /output/profiles.json || true
-          '
+            '
 
       - name: 校验最终固件产物与 Kernel ABI
         id: check
@@ -257,7 +255,7 @@ jobs:
           ls -lh output
           
           ib_abi="$(jq -r '.linux_kernel.vermagic' output/profiles.json)"
-          official_abi='${{ steps.official.outputs.official_abi }}'
+          official_abi="${{ steps.official.outputs.official_abi }}"
           
           echo "Official ABI: $official_abi"
           echo "Built Image ABI: $ib_abi"
@@ -270,7 +268,7 @@ jobs:
         with:
           name: HINLINK-H28K-Custom-${{ steps.release.outputs.tag }}-${{ steps.check.outputs.abi }}
           path: output/*
-          retention-days: 30
+          retention-days: 10
 
       - name: 发布固件到 Release
         if: ${{ inputs.upload_release }}
