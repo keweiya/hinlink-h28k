@@ -116,18 +116,18 @@ jobs:
           RELEASE_VER="${RELEASE_VER#v}"
           PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
 
-          # 1. 精准解析纯净的 SDK 文件名
+          # 1. 解析 SDK 文件名
           SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
           echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
 
-          # 2. 从已锁定的源直接下载 SDK
+          # 2. 从已锁定的源下载 SDK
           echo "=== 从已锁定的源下载 SDK ==="
           curl -fsSL --connect-timeout 10 "${WORKING_MIRROR}/${PATH_TARGET}/${SDK_FILENAME}" -o /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk_archive.tar --strip-components=1 -C /tmp/sdk/
 
-          # 3. 克隆第三方源码包
+          # 3. 克隆第三方源码包至 package 目录
           echo "=== 克隆第三方源码包 ==="
           mkdir -p /tmp/sdk/package/custom
           git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/luci-app-nikki
@@ -143,37 +143,47 @@ jobs:
           git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu
           git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu
 
-          # 4. 使用 SDK 增量编译生成 .apk 包
-          echo "=== 使用 SDK 增量编译生成 .apk 包 ==="
+          # 4. 建立索引并应用配置
+          echo "=== 使用 SDK 建立包索引并配置 ==="
           cd /tmp/sdk
-          ./scripts/feeds update -a >/dev/null 2>&1
-          ./scripts/feeds install -a >/dev/null 2>&1
+          
+          # 更新包数据库索引
+          ./scripts/feeds update -i >/dev/null 2>&1 || true
 
+          # 启用要编译的软件包
           echo "CONFIG_PACKAGE_luci-app-nikki=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-design=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-fluent=m" >> .config
           echo "CONFIG_PACKAGE_kmod-rtl8821cu=m" >> .config
           echo "CONFIG_PACKAGE_kmod-rtl88x2bu=m" >> .config
 
-          make defconfig >/dev/null 2>&1
+          make defconfig >/dev/null 2>&1 || true
 
-          # 智能编译逻辑：多线程静默编译，失败则切换单线程排查；若最终仍失败则 exit 1 阻断退出
-          for pkg in luci-app-nikki luci-theme-design luci-theme-fluent rtl8821cu rtl88x2bu; do
-            echo ">>> [阶段 1] 正在启动多线程并行编译第三方包: $pkg (-j$(nproc))..."
+          # 5. 编译第三方软件包
+          echo "=== 正在编译第三方软件包 ==="
+          
+          # 阶段 1：静默多线程批量编译自定义包
+          echo ">>> [阶段 1] 正在启动多线程并行编译 (-j$(nproc))..."
+          if make package/compile IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
+            echo "✅ 第三方包多线程编译成功！"
+          else
+            echo "--------------------------------------------------"
+            echo "⚠️ 批量多线程编译未全部完成，正在切换至 [阶段 2] 单线程排查模式..."
+            echo "--------------------------------------------------"
             
-            if make package/custom/$pkg/compile IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
-              echo "✅ 包 [$pkg] 多线程编译成功！"
-            else
-              echo "--------------------------------------------------"
-              echo "⚠️ 包 [$pkg] 多线程编译失败！切换到 [阶段 2] 单线程详细日志排查 ($pkg, V=s)..."
-              echo "--------------------------------------------------"
-              if ! make package/custom/$pkg/compile IGNORE_ERRORS=m -j1 V=s; then
-                echo "❌ 错误：包 [$pkg] 编译彻底失败！阻断构建程序！"
+            # 针对自定义包依次编译，若仍失败则直接阻断退出
+            for dir in package/custom/*; do
+              [ -d "$dir" ] || continue
+              pkg_name=$(basename "$dir")
+              echo "正在单线程编译/排查: $pkg_name ..."
+              if ! make "package/custom/$pkg_name/compile" IGNORE_ERRORS=m -j1 V=s; then
+                echo "❌ 错误：包 [$pkg_name] 编译彻底失败！阻断构建程序！"
                 exit 1
               fi
-            fi
-          done
+            done
+          fi
 
+          # 6. 收集编译好的 .apk 包
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
           echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
