@@ -38,7 +38,7 @@ on:
           - '2048'
           - '4096'
       include_third_party_pkgs:
-        description: '额外添加第三方 USB 驱动和 LuCI 插件主题'
+        description: '额外编译并添加第三方 USB 驱动与 LuCI 插件/主题'
         required: true
         default: false
         type: boolean
@@ -63,35 +63,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 准备第三方 USB 驱动与 LuCI 插件/主题源码
-        if: ${{ inputs.include_third_party_pkgs }}
-        run: |
-          set -euo pipefail
-          mkdir -p extra-packages
-
-          echo "=== 克隆第三方软件及 USB 驱动源码 ==="
-          # 1. Nikki 代理客户端
-          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git extra-packages/OpenWrt-nikki
-
-          # 2. Design 与 Fluent 主题
-          git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git extra-packages/luci-theme-design
-          
-          # Fluent 主题提取 package 目录处理
-          git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/luci-theme-fluent
-          if [ -d "/tmp/luci-theme-fluent/package/luci-theme-fluent" ]; then
-            cp -r /tmp/luci-theme-fluent/package/luci-theme-fluent extra-packages/
-          else
-            cp -r /tmp/luci-theme-fluent extra-packages/luci-theme-fluent
-          fi
-
-          # 3. Realtek morrownr USB 驱动源码
-          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git extra-packages/rtl8821cu || true
-          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git extra-packages/rtl88x2bu || true
-          git clone --depth 1 https://github.com/morrownr/8812au-20210820.git extra-packages/rtl8812au || true
-
-          ls -la extra-packages/
-
-      - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
+      - name: 运行 Docker ImageBuilder 容器连贯执行【源码编译 + 固件打包】
         env:
           IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-imagebuilder:${{ inputs.target_tag }}-${{ inputs.imagebuilder_strategy }}
           INCLUDE_THIRD_PARTY: ${{ inputs.include_third_party_pkgs }}
@@ -103,7 +75,7 @@ jobs:
           echo "=== 使用的 ImageBuilder 镜像名称 ==="
           echo "IMAGE_NAME=$IMAGE_NAME"
 
-          # 1. 默认必装的官方仓库插件
+          # 1. 默认必装的官方仓库插件与驱动
           BASE_PACKAGES=(
             luci-app-diskman
             luci-app-dockerman
@@ -129,7 +101,6 @@ jobs:
               luci-theme-fluent
               kmod-rtl8821cu
               kmod-rtl88x2bu
-              rtl8821cu-firmware
             )
             ALL_PACKAGES=("${BASE_PACKAGES[@]}" "${EXTRA_PACKAGES[@]}")
           else
@@ -145,28 +116,53 @@ jobs:
             --rm
             -e "PACKAGES=$PACKAGES_STR"
             -e "ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE"
+            -e "INCLUDE_THIRD_PARTY=$INCLUDE_THIRD_PARTY"
             -v "$GITHUB_WORKSPACE/output:/output"
             -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro"
           )
 
-          # 若勾选了第三方包，挂载到 Docker 内 ImageBuilder 本地 packages 目录
-          if [ "$INCLUDE_THIRD_PARTY" = "true" ] && [ -d "$GITHUB_WORKSPACE/extra-packages" ]; then
-            DOCKER_RUN_ARGS+=(-v "$GITHUB_WORKSPACE/extra-packages:/home/builder/imagebuilder/packages/extra:ro")
-          fi
-
           docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
             set -euo pipefail
-            echo "=== 开始使用 ImageBuilder 打包多格式固件 ==="
+
+            if [ "$INCLUDE_THIRD_PARTY" = "true" ]; then
+              echo "=== 1. 正在 Docker 容器内克隆第三方插件与驱动源码 ==="
+              mkdir -p package/custom
+
+              git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git package/custom/luci-app-nikki || true
+              git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git package/custom/luci-theme-design || true
+              
+              # Fluent 主题处理子目录
+              git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/luci-theme-fluent || true
+              if [ -d "/tmp/luci-theme-fluent/package/luci-theme-fluent" ]; then
+                cp -r /tmp/luci-theme-fluent/package/luci-theme-fluent package/custom/
+              else
+                cp -r /tmp/luci-theme-fluent package/custom/luci-theme-fluent || true
+              fi
+
+              # USB 驱动源码
+              git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git package/custom/rtl8821cu || true
+              git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git package/custom/rtl88x2bu || true
+
+              echo "=== 2. 增量编译第三方软件包生成 .apk ==="
+              # 如果容器内具备 OpenWrt 编译环境（如 SDK/Build 目录），执行增量 compile
+              if [ -f "scripts/feeds" ] || [ -f "Makefile" ]; then
+                for pkg_dir in package/custom/*; do
+                  [ -d "$pkg_dir" ] || continue
+                  echo "正在编译第三方包: $(basename "$pkg_dir")..."
+                  make "package/custom/$(basename "$pkg_dir")/compile" V=s || true
+                done
+                
+                echo "=== 3. 将编译好的 .apk 自动同步并建立本地索引 ==="
+                mkdir -p packages
+                find bin/packages/ -type f -name "*.apk" -exec cp -av {} packages/ \; 2>/dev/null || true
+              fi
+            fi
+
+            echo "=== 4. 开始使用 ImageBuilder 打包多格式固件 ==="
             echo "RootFS 大小: ${ROOTFS_PARTSIZE} MB"
             echo "软件包: $PACKAGES"
 
-            # 刷新本地包索引（如果挂载了第三方包）
-            if [ -d packages/extra ]; then
-              echo "检测到第三方挂载包，同步建立本地 package 索引..."
-              cp -rf packages/extra/* packages/ 2>/dev/null || true
-            fi
-
-            # 打包固件：开启 Squashfs, ext4 以及 LXC (tar.gz) 构建
+            # 执行打包：开启 Squashfs, ext4 以及 LXC (tar.gz) 构建
             make image PROFILE=hinlink_h28k \
               PACKAGES="$PACKAGES" \
               FILES=files \
@@ -175,7 +171,7 @@ jobs:
               CONFIG_TARGET_ROOTFS_EXT4FS=y \
               CONFIG_TARGET_ROOTFS_TARGZ=y
 
-            # 收集生成的镜像和 Profiles 元数据
+            # 收集生成的镜像与 Profiles 元数据
             mkdir -p /output
             cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
             cp -av bin/targets/rockchip/armv8/*rootfs*.tar.gz /output/ || true
