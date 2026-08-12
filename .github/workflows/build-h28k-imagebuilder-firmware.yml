@@ -1,0 +1,226 @@
+name: 使用 Docker ImageBuilder 打包 H28K 多格式固件
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'OpenWrt / ImmortalWrt 发布版本 Tag'
+        required: true
+        default: 'v25.12.1'
+        type: choice
+        options:
+          - v25.12.1
+          - v25.12.0
+          - v24.10.6
+          - v24.10.5
+          - v24.10.4
+          - v24.10.3
+          - v24.10.2
+          - v24.10.1
+          - v24.10.0
+      imagebuilder_strategy:
+        description: 'ImageBuilder 镜像策略版本'
+        required: true
+        default: 'official-buildinfo-full'
+        type: choice
+        options:
+          - official-buildinfo-full
+          - official-buildbot-kernel-ib
+          - kernel-strict
+      rootfs_size:
+        description: '初始根目录/系统分区大小 (MB)'
+        required: true
+        default: '2048'
+        type: choice
+        options:
+          - '512'
+          - '1024'
+          - '2048'
+          - '4096'
+      include_third_party_pkgs:
+        description: '额外添加第三方 USB 驱动和 LuCI 插件主题'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build-firmware:
+    name: 打包 H28K (${{ inputs.target_tag }}, ${{ inputs.imagebuilder_strategy }}, ${{ inputs.rootfs_size }}MB)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 检出当前支持仓库
+        uses: actions/checkout@v4
+
+      - name: 登录 GHCR 镜像仓库
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 准备第三方 USB 驱动与 LuCI 插件/主题源码
+        if: ${{ inputs.include_third_party_pkgs }}
+        run: |
+          set -euo pipefail
+          mkdir -p extra-packages
+
+          echo "=== 克隆第三方软件及 USB 驱动源码 ==="
+          # 1. Nikki 代理客户端
+          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git extra-packages/OpenWrt-nikki
+
+          # 2. Design 与 Fluent 主题
+          git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git extra-packages/luci-theme-design
+          
+          # Fluent 主题提取 package 目录处理
+          git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/luci-theme-fluent
+          if [ -d "/tmp/luci-theme-fluent/package/luci-theme-fluent" ]; then
+            cp -r /tmp/luci-theme-fluent/package/luci-theme-fluent extra-packages/
+          else
+            cp -r /tmp/luci-theme-fluent extra-packages/luci-theme-fluent
+          fi
+
+          # 3. Realtek morrownr USB 驱动源码
+          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git extra-packages/rtl8821cu || true
+          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git extra-packages/rtl88x2bu || true
+          git clone --depth 1 https://github.com/morrownr/8812au-20210820.git extra-packages/rtl8812au || true
+
+          ls -la extra-packages/
+
+      - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-imagebuilder:${{ inputs.target_tag }}-${{ inputs.imagebuilder_strategy }}
+          INCLUDE_THIRD_PARTY: ${{ inputs.include_third_party_pkgs }}
+          ROOTFS_PARTSIZE: ${{ inputs.rootfs_size }}
+        run: |
+          set -euo pipefail
+          mkdir -p output files
+
+          echo "=== 使用的 ImageBuilder 镜像名称 ==="
+          echo "IMAGE_NAME=$IMAGE_NAME"
+
+          # 1. 默认必装的官方仓库插件
+          BASE_PACKAGES=(
+            luci-app-diskman
+            luci-app-dockerman
+            dockerd
+            luci-app-openclash
+            wpad-openssl
+            openssh-sftp-server
+            wireless-regdb
+            kmod-mt7921u
+            kmod-rtl8812au-ct
+            kmod-rtl8192cu
+            kmod-rtl8188eu
+            kmod-mt7601u
+            kmod-mt76x2u
+            rtl8192cu-firmware
+          )
+
+          # 2. 如果开启第三方开关，追加额外包
+          if [ "$INCLUDE_THIRD_PARTY" = "true" ]; then
+            EXTRA_PACKAGES=(
+              luci-app-nikki
+              luci-theme-design
+              luci-theme-fluent
+              kmod-rtl8821cu
+              kmod-rtl88x2bu
+              rtl8821cu-firmware
+            )
+            ALL_PACKAGES=("${BASE_PACKAGES[@]}" "${EXTRA_PACKAGES[@]}")
+          else
+            ALL_PACKAGES=("${BASE_PACKAGES[@]}")
+          fi
+
+          PACKAGES_STR="${ALL_PACKAGES[*]}"
+          echo "=== 拟安装软件包列表 ==="
+          echo "$PACKAGES_STR"
+
+          # 3. 构造 Docker 运行参数
+          DOCKER_RUN_ARGS=(
+            --rm
+            -e "PACKAGES=$PACKAGES_STR"
+            -e "ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE"
+            -v "$GITHUB_WORKSPACE/output:/output"
+            -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro"
+          )
+
+          # 若勾选了第三方包，挂载到 Docker 内 ImageBuilder 本地 packages 目录
+          if [ "$INCLUDE_THIRD_PARTY" = "true" ] && [ -d "$GITHUB_WORKSPACE/extra-packages" ]; then
+            DOCKER_RUN_ARGS+=(-v "$GITHUB_WORKSPACE/extra-packages:/home/builder/imagebuilder/packages/extra:ro")
+          fi
+
+          docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
+            set -euo pipefail
+            echo "=== 开始使用 ImageBuilder 打包多格式固件 ==="
+            echo "RootFS 大小: ${ROOTFS_PARTSIZE} MB"
+            echo "软件包: $PACKAGES"
+
+            # 刷新本地包索引（如果挂载了第三方包）
+            if [ -d packages/extra ]; then
+              echo "检测到第三方挂载包，同步建立本地 package 索引..."
+              cp -rf packages/extra/* packages/ 2>/dev/null || true
+            fi
+
+            # 打包固件：开启 Squashfs, ext4 以及 LXC (tar.gz) 构建
+            make image PROFILE=hinlink_h28k \
+              PACKAGES="$PACKAGES" \
+              FILES=files \
+              ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE" \
+              CONFIG_TARGET_ROOTFS_SQUASHFS=y \
+              CONFIG_TARGET_ROOTFS_EXT4FS=y \
+              CONFIG_TARGET_ROOTFS_TARGZ=y
+
+            # 收集生成的镜像和 Profiles 元数据
+            mkdir -p /output
+            cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
+            cp -av bin/targets/rockchip/armv8/*rootfs*.tar.gz /output/ || true
+            [ -f profiles.json ] && cp -av profiles.json /output/profiles.json || true
+          '
+
+      - name: 输出并校验固件 ABI 一致性
+        run: |
+          set -euo pipefail
+          
+          # 1. 读取打包出的 profiles.json 中的 ABI
+          BUILT_ABI=$(jq -r '.linux_kernel.vermagic // empty' output/profiles.json)
+          
+          # 2. 从官方源动态读取对应 Tag 的 ABI
+          VERSION="${{ inputs.target_tag }}"
+          VERSION="${VERSION#v}"
+          OFFICIAL_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/rockchip/armv8/profiles.json"
+          OFFICIAL_ABI=$(curl -fsSL "$OFFICIAL_URL" | jq -r '.linux_kernel.vermagic // empty')
+
+          echo "=================================================="
+          echo "打包固件内核 ABI (vermagic): $BUILT_ABI"
+          echo "官方 Release 内核 ABI (vermagic): $OFFICIAL_ABI"
+          echo "=================================================="
+
+          # 3. 写入 GitHub Actions 日志面板 Summary
+          echo "### 固件内核 ABI 校验结果" >> $GITHUB_STEP_SUMMARY
+          echo "- **打包固件 ABI**: \`$BUILT_ABI\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **官方 Release ABI**: \`$OFFICIAL_ABI\`" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "$BUILT_ABI" ] && [ "$BUILT_ABI" = "$OFFICIAL_ABI" ]; then
+            echo "✅ **结论**: 打包固件的内核 ABI 与官方 100% 对齐，可正常在线安装所有官方 \`kmod-*\` 模块！" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **结论**: 警告！固件 ABI 与官方不匹配，在线安装 \`kmod-*\` 可能会提示 ABI mismatch！" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: 获取编译日期
+        run: echo "BUILD_DATE=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_ENV"
+
+      - name: 上传固件产物 (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-h28k-${{ inputs.target_tag }}-${{ inputs.imagebuilder_strategy }}-${{ env.BUILD_DATE }}-${{ inputs.rootfs_size }}M
+          path: |
+            output/*hinlink*h28k*
+            output/*rootfs*.tar.gz
+            output/profiles.json
+          retention-days: 14
