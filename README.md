@@ -30,9 +30,8 @@ GitHub Actions 每周自动运行一次，也可以在 Actions 页面手动触�
 
 | 文件 | 用途 |
 | --- | --- |
-| `firmware.conf` | 设置 LAN 地址、root 密码、默认主题和 ABI 校验开关。 |
 | `packages.conf` | 每行一条完整的 `git clone` 命令。 |
-| `hinlink-h28k.config` | H28K 目标、软件包和分区配置。 |
+| `h28k-imagebuilder.config` | H28K 目标和 ImageBuilder 构建配置。 |
 
 ## 默认包含
 

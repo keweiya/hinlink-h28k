@@ -1,6 +1,9 @@
 name: 每周自动编译 HINLINK H28K 固件
 
 on:
+  schedule:
+    # 每周一 01:00 上海时间（UTC+8）自动编译
+    - cron: '0 17 * * 0'
   workflow_dispatch:
     inputs:
       target_tag:
@@ -10,6 +13,31 @@ on:
         type: string
       use_cache:
         description: '使用 GitHub Actions 源码缓存'
+        required: true
+        default: true
+        type: boolean
+      rootfs_partsize:
+        description: 'RootFS 大小'
+        required: true
+        default: '2G'
+        type: choice
+        options:
+          - 512M
+          - 1G
+          - 2G
+          - 4G
+      lan_ip:
+        description: 'LAN 管理地址'
+        required: true
+        default: '192.168.100.1'
+        type: string
+      root_password:
+        description: 'root 密码，留空保留默认'
+        required: false
+        default: 'password'
+        type: string
+      upload_release:
+        description: '发布到 Release'
         required: true
         default: true
         type: boolean
@@ -26,18 +54,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
+    env:
+      MIRRORS_CONF: config/immortalwrt-mirrors.conf
+
     steps:
       - name: 检出支持仓库
         uses: actions/checkout@v4
 
-      - name: 检查磁盘空间
-        run: |
-          echo "=== Initial disk space ==="
-          df -h /
-
       - name: 清理磁盘空间
         run: |
-          echo "=== Before cleanup ==="
+          echo "清理前："
           df -h / | tail -1
           sudo rm -rf /usr/share/dotnet 2>/dev/null || true
           sudo rm -rf /usr/local/lib/android 2>/dev/null || true
@@ -48,7 +74,7 @@ jobs:
           sudo rm -rf /usr/local/share/chromium 2>/dev/null || true
           sudo rm -rf /usr/share/swift 2>/dev/null || true
           sudo docker image prune -af 2>/dev/null || true
-          echo "=== After cleanup ==="
+          echo "清理后："
           df -h / | tail -1
 
       - name: 安装编译依赖
@@ -69,17 +95,54 @@ jobs:
         id: release
         run: |
           set -eu
-          RELEASE_TAG="${{ inputs.target_tag }}"
+          RELEASE_TAG="${{ inputs.target_tag || 'v25.12.1' }}"
           RELEASE_VERSION="${RELEASE_TAG#v}"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          PATH_TARGET="releases/${RELEASE_VERSION}/targets/rockchip/armv8"
           echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Target Release Tag: $RELEASE_TAG"
+          echo "path_target=$PATH_TARGET" >> "$GITHUB_OUTPUT"
+          echo "版本：$RELEASE_TAG"
+
+      - name: 选择镜像源
+        id: mirror
+        run: |
+          set -eu
+          PATH_TARGET='${{ steps.release.outputs.path_target }}'
+          MIRRORS_FILE="$MIRRORS_CONF"
+          if [ ! -f "$MIRRORS_FILE" ]; then
+            echo "缺少镜像配置：$MIRRORS_FILE" >&2
+            exit 1
+          fi
+          WORKING_MIRROR=""
+          echo "探测镜像源：$MIRRORS_FILE"
+          while IFS= read -r mirror || [ -n "$mirror" ]; do
+            mirror="${mirror%$'\r'}"
+            mirror="${mirror%%#*}"
+            mirror="$(xargs <<< "$mirror")"
+            [ -n "$mirror" ] || continue
+            mirror="${mirror%/}"
+            echo "探测：$mirror"
+            if curl -fsSL --connect-timeout 4 --retry 0 "${mirror}/${PATH_TARGET}/sha256sums" -o /tmp/sha256sums; then
+              WORKING_MIRROR="$mirror"
+              echo "选用：$WORKING_MIRROR"
+              break
+            fi
+            echo "跳过：$mirror"
+          done < "$MIRRORS_FILE"
+          if [ -z "$WORKING_MIRROR" ]; then
+            echo "没有可用镜像源" >&2
+            exit 1
+          fi
+          BASE_URL="${WORKING_MIRROR}/${PATH_TARGET}"
+          echo "WORKING_MIRROR=${WORKING_MIRROR}" >> "$GITHUB_ENV"
+          echo "working_mirror=${WORKING_MIRROR}" >> "$GITHUB_OUTPUT"
+          echo "base_url=${BASE_URL}" >> "$GITHUB_OUTPUT"
 
       - name: 克隆指定版本源码
         run: |
           git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
             https://github.com/immortalwrt/immortalwrt.git source
-          echo "=== Clone completed, disk space ==="
+          echo "克隆完成，磁盘："
           df -h / | tail -1
 
       - name: 应用 HINLINK H28K 补丁
@@ -88,9 +151,9 @@ jobs:
           set -eu
           for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
             [ -f "$patch" ] || continue
-            echo "=== Applying patch: $(basename "$patch") ==="
+            echo "应用补丁：$(basename "$patch")"
             git apply --check --3way "$patch" || {
-              echo "Patch check failed: $patch"
+              echo "补丁检查失败：$patch"
               git apply --reject "$patch" || true
               find . -name '*.rej' -print -exec cat {} \;
               exit 1
@@ -106,30 +169,36 @@ jobs:
         working-directory: source
         run: |
           set -eu
-          curl -fsSL \
-            "https://downloads.immortalwrt.org/releases/${{ steps.release.outputs.version }}/targets/rockchip/armv8/feeds.buildinfo" \
-            -o feeds.conf.default
+          curl -fsSL "${{ steps.mirror.outputs.base_url }}/feeds.buildinfo" -o feeds.conf.default
           sha256sum feeds.conf.default > .feeds.conf.default.sha256
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           sha256sum -c .feeds.conf.default.sha256
 
-      - name: 应用构建配置
+      - name: 应用纯净版构建配置
         working-directory: source
         run: |
           set -eu
+          # Weekly source builds are intentionally clean builds: do not clone
+          # config/packages.conf and do not set third-party LuCI themes/apps.
+          cat > /tmp/firmware-clean.conf <<'EOF'
+          lan_ip=${{ inputs.lan_ip || '192.168.100.1' }}
+          password=${{ inputs.root_password || 'password' }}
+          check_official_abi=true
+          EOF
           bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
             . \
-            "$GITHUB_WORKSPACE/config/firmware.conf" \
-            "$GITHUB_WORKSPACE/config/packages.conf"
+            /tmp/firmware-clean.conf \
+            /dev/null
 
       - name: 提取官方内核配置
         working-directory: source
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          IMMORTALWRT_BASE_URL: ${{ steps.mirror.outputs.base_url }}
         run: |
           set -eu
-          BUILDINFO_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VERSION}/targets/rockchip/armv8"
+          BUILDINFO_URL='${{ steps.mirror.outputs.base_url }}'
           curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
 
           awk '
@@ -144,12 +213,23 @@ jobs:
           grep -q '^CONFIG_DEVEL=y$' .config.official
 
           cat .config.official \
-            "$GITHUB_WORKSPACE/config/hinlink-h28k.config" > .config
+            "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" > .config
+          ROOTFS_PARTSIZE_LABEL='${{ inputs.rootfs_partsize || '2G' }}'
+          case "$ROOTFS_PARTSIZE_LABEL" in
+            512M) ROOTFS_PARTSIZE=512 ;;
+            1G) ROOTFS_PARTSIZE=1024 ;;
+            2G) ROOTFS_PARTSIZE=2048 ;;
+            4G) ROOTFS_PARTSIZE=4096 ;;
+            *) echo "不支持的 RootFS 大小：${ROOTFS_PARTSIZE_LABEL}" >&2; exit 1 ;;
+          esac
+          sed -i '/^CONFIG_TARGET_ROOTFS_PARTSIZE=/d' .config
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE}" >> .config
+          echo "ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE} MiB"
           make defconfig
 
       - name: 恢复源码缓存
         id: source-cache
-        if: ${{ inputs.use_cache }}
+        if: ${{ inputs.use_cache || github.event_name == 'schedule' }}
         uses: actions/cache/restore@v4
         with:
           path: source/dl
@@ -162,14 +242,18 @@ jobs:
         working-directory: source
         timeout-minutes: 90
         run: |
+          if [ -n "${WORKING_MIRROR:-}" ]; then
+            echo "替换软件源：$WORKING_MIRROR"
+            sed -i "s|https://downloads.immortalwrt.org|$WORKING_MIRROR|g" .config || true
+          fi
           make -j"$(nproc)" download V=s
           find dl -size -1024c -print -delete
           du -sh dl
-          echo "=== Download completed, disk space ==="
+          echo "下载完成，磁盘："
           df -h / | tail -1
 
       - name: 保存源码缓存
-        if: ${{ inputs.use_cache && steps.source-cache.outputs.cache-hit != 'true' }}
+        if: ${{ (inputs.use_cache || github.event_name == 'schedule') && steps.source-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: source/dl
@@ -179,8 +263,8 @@ jobs:
         working-directory: source
         timeout-minutes: 300
         run: |
-          echo "=== Build started at $(date) ==="
-          echo ">>> 阶段 1：启动多线程并行编译 (-j$(nproc))..."
+          echo "开始构建：$(date)"
+          echo "阶段 1：并行编译 (-j$(nproc))"
           
           # 1. 执行多线程全力编译并记录输出
           make -j"$(nproc)" 2>&1 | tee build.log
@@ -188,19 +272,17 @@ jobs:
 
           # 2. 判断多线程结果，失败则自动切换为单线程排查
           if [ "$code" -ne 0 ]; then
-            echo "--------------------------------------------------"
-            echo ">>> 多线程编译失败！切换到阶段 2：单线程详细模式排查 (-j1 V=s)..."
-            echo "--------------------------------------------------"
+            echo "阶段 1 失败，阶段 2：单线程详细模式 (-j1 V=s)"
             
             make -j1 V=s 2>&1 | tee build_singlethread.log
             code=${PIPESTATUS[0]}
             
-            echo "=== 编译彻底失败 at $(date), exit code: $code ==="
+            echo "编译失败：$(date)，退出码 $code"
             exit "$code"
           fi
 
-          echo "=== Build finished successfully at $(date) ==="
-          echo "=== Disk space ==="
+          echo "构建完成：$(date)"
+          echo "磁盘："
           df -h / | tail -1
 
       - name: 校验内核 ABI
@@ -208,11 +290,17 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          IMMORTALWRT_BASE_URL: ${{ steps.mirror.outputs.base_url }}
         run: |
           set -eu
+          cat > /tmp/firmware-clean.conf <<'EOF'
+          lan_ip=${{ inputs.lan_ip }}
+          password=${{ inputs.root_password }}
+          check_official_abi=true
+          EOF
           bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
             . \
-            "$GITHUB_WORKSPACE/config/firmware.conf" \
+            /tmp/firmware-clean.conf \
             "$RELEASE_VERSION" \
             "$RELEASE_TAG" \
             "$GITHUB_ENV"
@@ -225,7 +313,7 @@ jobs:
           shopt -s nullglob
           FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
           if [ "${#FIRMWARE_FILES[@]}" -eq 0 ]; then
-            echo "HINLINK H28K sysupgrade firmware not found"
+            echo "未找到 HINLINK H28K sysupgrade 固件"
             ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
             exit 1
           fi
@@ -233,30 +321,51 @@ jobs:
           echo "BUILD_DATE=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_ENV"
           echo "UPSTREAM_HASH=$(git log -1 --format='%h')" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-          sed -n 's/^lan_ip=/FIRMWARE_LAN_IP=/p; s/^password=/FIRMWARE_PASSWORD=/p' \
-            "$GITHUB_WORKSPACE/config/firmware.conf" >> "$GITHUB_ENV"
+          echo 'FIRMWARE_LAN_IP=${{ inputs.lan_ip || '192.168.100.1' }}' >> "$GITHUB_ENV"
+          echo 'FIRMWARE_PASSWORD=${{ inputs.root_password || 'password' }}' >> "$GITHUB_ENV"
+          echo 'ROOTFS_PARTSIZE_LABEL=${{ inputs.rootfs_partsize || '2G' }}' >> "$GITHUB_ENV"
 
       - name: 上传固件构件
         uses: actions/upload-artifact@v4
         with:
           name: HINLINK H28K 固件-${{ env.RELEASE_TAG }}
           path: source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
-          retention-days: 30
+          retention-days: 14
+
+      - name: 生成编译总结
+        id: summary
+        env:
+          BUILD_DATE: ${{ env.BUILD_DATE }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+          UPSTREAM_HASH: ${{ env.UPSTREAM_HASH }}
+          ROOTFS_PARTSIZE_LABEL: ${{ env.ROOTFS_PARTSIZE_LABEL }}
+          FIRMWARE_LAN_IP: ${{ env.FIRMWARE_LAN_IP }}
+          FIRMWARE_PASSWORD: ${{ env.FIRMWARE_PASSWORD }}
+          WORKING_MIRROR: ${{ steps.mirror.outputs.working_mirror }}
+          KERNEL_ABI: ${{ env.KERNEL_ABI }}
+        run: |
+          set -euo pipefail
+          manifest="$(find source/bin/targets/rockchip/armv8 -maxdepth 1 -name '*hinlink_h28k*.manifest' -print -quit || true)"
+          bash scripts/firmware_summary.sh source/bin/targets/rockchip/armv8/release-body.md "$manifest" ""
+          cat source/bin/targets/rockchip/armv8/release-body.md >> "$GITHUB_STEP_SUMMARY"
+          echo "body=source/bin/targets/rockchip/armv8/release-body.md" >> "$GITHUB_OUTPUT"
+
+      - name: 清理当天 Release
+        if: ${{ inputs.upload_release || github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: h28k-${{ env.RELEASE_TAG }}-${{ env.BUILD_DATE }}
+        run: |
+          set -euo pipefail
+          gh release delete "$RELEASE_TAG" --cleanup-tag -y 2>/dev/null || true
 
       - name: 发布固件 Release
+        if: ${{ inputs.upload_release || github.event_name == 'schedule' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: h28k-${{ env.RELEASE_TAG }}-${{ env.BUILD_DATE }}
           name: "HINLINK H28K 固件 ${{ env.RELEASE_TAG }} (${{ env.BUILD_DATE }})"
-          body: |
-            ## HINLINK H28K 固件
-
-            - **编译日期**：${{ env.BUILD_DATE }}
-            - **上游版本**：${{ env.RELEASE_TAG }} (${{ env.UPSTREAM_HASH }})
-            - **设备型号**：HINLINK H28K (RK3528)
-            - **管理地址**：`${{ env.FIRMWARE_LAN_IP }}`
-            - **root 密码**：`${{ env.FIRMWARE_PASSWORD }}`
-            - **内核 ABI**：`${{ env.KERNEL_ABI }}`
+          body_path: ${{ steps.summary.outputs.body }}
           files: source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
           make_latest: true
           fail_on_unmatched_files: true
@@ -273,16 +382,3 @@ jobs:
             source/build_singlethread.log
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: 报告构建结果
-        if: always()
-        run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            echo "HINLINK H28K build succeeded"
-            echo "Release: https://github.com/${{ github.repository }}/releases/tag/h28k-${{ env.RELEASE_TAG }}-${{ env.BUILD_DATE }}"
-          elif [ "${{ job.status }}" = "failure" ]; then
-            echo "Build failed; check the logs above"
-            echo "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          else
-            echo "Build status: ${{ job.status }}"
-          fi
