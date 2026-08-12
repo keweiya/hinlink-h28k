@@ -1,18 +1,14 @@
 name: 每日自动编译 HINLINK H28K 固件
 
 on:
-  schedule:
-    # 每天 01:00 上海时间（UTC+8）默认编译 master
-    - cron: '0 17 * * *'
   workflow_dispatch:
     inputs:
       target_tag:
         description: 'ImmortalWrt 版本（定时默认 master；正式版支持 v25.12.x 与 v24.10.5+）'
         required: true
-        default: 'master'
+        default: 'v25.12.1'
         type: choice
         options:
-          - master
           - v25.12.1
           - v25.12.0
           - v24.10.6
