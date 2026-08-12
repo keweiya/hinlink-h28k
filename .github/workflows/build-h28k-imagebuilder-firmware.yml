@@ -38,7 +38,7 @@ on:
           - '2048'
           - '4096'
       include_third_party_pkgs:
-        description: '额外添加第三方 LuCI 插件与主题 (Nikki + 主题)'
+        description: '额外编译并添加第三方 LuCI 插件与主题 (Nikki + 主题)'
         required: true
         default: false
         type: boolean
@@ -106,7 +106,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-pyelftools python3-pip rsync swig python3-dev python3-setuptools
 
-      - name: 宿主环境：下载 SDK 编译主题，并直接获取预编译的 Nikki 包
+      - name: 宿主环境：下载 SDK 并增量编译第三方包
         if: ${{ inputs.include_third_party_pkgs }}
         run: |
           set -euo pipefail
@@ -116,15 +116,16 @@ jobs:
           RELEASE_VER="${RELEASE_VER#v}"
           PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
 
-          # 1. 下载 SDK 编译轻量级 UI 主题（Design 与 Fluent 纯脚本编译 100% 成功）
           SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
-          echo "下载 SDK 用于编译纯脚本主题: [${SDK_FILENAME}]"
+          echo "下载 SDK: [${SDK_FILENAME}]"
           curl -fsSL --connect-timeout 10 "${WORKING_MIRROR}/${PATH_TARGET}/${SDK_FILENAME}" -o /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk_archive.tar --strip-components=1 -C /tmp/sdk/
 
+          echo "=== 克隆第三方源码包 ==="
           mkdir -p /tmp/sdk/package/custom
+          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/nikki
           git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git /tmp/sdk/package/custom/luci-theme-design
           
           git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/fluent_src
@@ -134,35 +135,43 @@ jobs:
             cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent
           fi
 
+          echo "=== 注册并更新 SDK 包索引 ==="
           cd /tmp/sdk
-          ./scripts/feeds update -i >/dev/null 2>&1 || true
+          ./scripts/feeds update -a >/dev/null 2>&1 || true
+          ./scripts/feeds install -a >/dev/null 2>&1 || true
 
+          echo "CONFIG_PACKAGE_nikki=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-design=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-fluent=m" >> .config
+
           make defconfig >/dev/null 2>&1 || true
 
-          echo "=== 正在编译纯脚本主题包 ==="
-          for dir in package/custom/*; do
-            [ -d "$dir" ] || continue
-            pkg_name=$(basename "$dir")
-            echo "编译主题: $pkg_name"
-            make "package/custom/$pkg_name/compile" IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1 || \
-            make "package/custom/$pkg_name/compile" IGNORE_ERRORS=m -j1 V=s
+          CUSTOM_PKGS=("nikki" "luci-theme-design" "luci-theme-fluent")
+          total=${#CUSTOM_PKGS[@]}
+          idx=1
+
+          for pkg in "${CUSTOM_PKGS[@]}"; do
+            echo "=================================================="
+            echo ">>> [$idx/$total] 正在编译包: $pkg"
+            echo "=================================================="
+            
+            if make "package/$pkg/compile" IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
+              echo "✅ 包 [$pkg] 多线程编译成功！"
+            else
+              echo "--------------------------------------------------"
+              echo "⚠️ 多线程未过，切换单线程详细日志排查 ($pkg, V=s)..."
+              echo "--------------------------------------------------"
+              if ! make "package/$pkg/compile" IGNORE_ERRORS=m -j1 V=s; then
+                echo "❌ 错误：包 [$pkg] 编译彻底失败！阻断构建！"
+                exit 1
+              fi
+              echo "✅ 包 [$pkg] 单线程编译成功！"
+            fi
+            idx=$((idx + 1))
           done
 
-          # 2. 直接下载 Nikki 官方预编译好的最新架构 APK（避免本地用 Go 交叉编译报错）
-          echo "=== 正在获取 Nikki 官方预编译构件 ==="
-          NIKKI_URL="https://github.com/nikkinikki-org/OpenWrt-nikki/releases/latest/download/luci-app-nikki_aarch64_cortex-a53.apk" || true
-          # 兼容不同命名，若上面获取失败尝试通用命名
-          curl -fsSL "$NIKKI_URL" -o "$GITHUB_WORKSPACE/extra-apks/luci-app-nikki.apk" || \
-          curl -fsSL "https://github.com/nikkinikki-org/OpenWrt-nikki/releases/latest/download/nikki_aarch64_cortex-a53.apk" -o "$GITHUB_WORKSPACE/extra-apks/nikki.apk" || true
-
-          # 3. 收集编译好的主题 .apk 包
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
-          
-          echo "=================================================="
-          echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
-          echo "=================================================="
+          echo "=== 最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
 
       - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
@@ -196,7 +205,6 @@ jobs:
 
           if [ "$INCLUDE_THIRD_PARTY" = "true" ]; then
             EXTRA_PACKAGES=(
-              luci-app-nikki
               nikki
               luci-theme-design
               luci-theme-fluent
