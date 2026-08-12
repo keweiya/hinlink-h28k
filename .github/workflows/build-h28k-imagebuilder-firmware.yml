@@ -72,7 +72,7 @@ jobs:
           RELEASE_VER="${{ inputs.target_tag }}"
           RELEASE_VER="${RELEASE_VER#v}"
           
-          # 定义首选官网 + 备用镜像站函数
+          # 定义首选官网 + 6 大备用镜像站的智能下载函数
           smart_fetch() {
             local path_suffix="$1"
             local dest="$2"
@@ -80,28 +80,34 @@ jobs:
               "https://downloads.immortalwrt.org"
               "https://mirrors.ustc.edu.cn/immortalwrt"
               "https://mirrors.nju.edu.cn/immortalwrt"
+              "https://mirrors.sjtug.sjtu.edu.cn/immortalwrt"
+              "https://mirrors.tuna.tsinghua.edu.cn/immortalwrt"
+              "https://mirrors.vsean.net/openwrt"
             )
             for m in "${mirrors[@]}"; do
               echo "尝试链接: ${m}/${path_suffix}"
-              if curl -fsSL --connect-timeout 8 --retry 1 "${m}/${path_suffix}" -o "$dest"; then
-                echo "下载成功，来自: ${m}"
+              if curl -fsSL --connect-timeout 5 --retry 1 "${m}/${path_suffix}" -o "$dest"; then
+                echo "✅ 下载成功，来自源: ${m}"
                 return 0
               fi
             done
             return 1
           }
 
-          echo "=== 1. 宿主环境：下载官方 sha256sums 确认 SDK 文件名 ==="
+          echo "=== 1. 宿主环境：下载 sha256sums 并精准解析 SDK 文件名 ==="
           PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
           smart_fetch "${PATH_TARGET}/sha256sums" /tmp/sha256sums
 
-          SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | head -n1)
+          # 清理通配符 * 和多余空格，获取纯净的文件名
+          SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
+          echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
+
           if [ -z "$SDK_FILENAME" ]; then
-            echo "错误：无法在镜像站匹配到 SDK 文件！"
+            echo "错误：无法在 sha256sums 中解析到 SDK 文件名！"
             exit 1
           fi
 
-          echo "=== 2. 多源回退机制下载 SDK: $SDK_FILENAME ==="
+          echo "=== 2. 多源回退机制下载 SDK: ${SDK_FILENAME} ==="
           smart_fetch "${PATH_TARGET}/${SDK_FILENAME}" /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
@@ -122,7 +128,7 @@ jobs:
           git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu || true
           git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu || true
 
-          echo "=== 4. SDK 增量编译为 .apk ==="
+          echo "=== 4. 使用 SDK 增量编译生成 .apk 包 ==="
           cd /tmp/sdk
           ./scripts/feeds update -a || true
           ./scripts/feeds install -a || true
@@ -138,10 +144,12 @@ jobs:
           make defconfig
 
           for pkg in luci-app-nikki luci-theme-design luci-theme-fluent rtl8821cu rtl88x2bu; do
+            echo "正在 SDK 中编译: $pkg..."
             make "package/custom/$pkg/compile" V=s -j$(nproc) || true
           done
 
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
+          echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
 
       - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
@@ -200,7 +208,7 @@ jobs:
           docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
             set -euo pipefail
             
-            # 如果官网源慢，替换容器内为中科大镜像源
+            # 如果官网源超时，自动替换容器内的软件源为中科大镜像源
             if [ -f repositories.conf ]; then
               sed -i "s|https://downloads.immortalwrt.org|https://mirrors.ustc.edu.cn/immortalwrt|g" repositories.conf || true
             fi
@@ -231,17 +239,19 @@ jobs:
           VERSION="${{ inputs.target_tag }}"
           VERSION="${VERSION#v}"
           
-          # 多源下载官方 profiles.json
           OFFICIAL_ABI=""
           mirrors=(
             "https://downloads.immortalwrt.org"
             "https://mirrors.ustc.edu.cn/immortalwrt"
             "https://mirrors.nju.edu.cn/immortalwrt"
+            "https://mirrors.sjtug.sjtu.edu.cn/immortalwrt"
+            "https://mirrors.tuna.tsinghua.edu.cn/immortalwrt"
+            "https://mirrors.vsean.net/openwrt"
           )
           for m in "${mirrors[@]}"; do
             echo "尝试从 $m 读取官方 profiles.json..."
-            if OFFICIAL_ABI=$(curl -fsSL --connect-timeout 8 "${m}/releases/${VERSION}/targets/rockchip/armv8/profiles.json" | jq -r '.linux_kernel.vermagic // empty') && [ -n "$OFFICIAL_ABI" ]; then
-              echo "成功获取官方 ABI，来自: $m"
+            if OFFICIAL_ABI=$(curl -fsSL --connect-timeout 5 "${m}/releases/${VERSION}/targets/rockchip/armv8/profiles.json" | jq -r '.linux_kernel.vermagic // empty') && [ -n "$OFFICIAL_ABI" ]; then
+              echo "✅ 成功获取官方 ABI，来自源: $m"
               break
             fi
           done
