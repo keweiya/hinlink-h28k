@@ -1,11 +1,59 @@
-diff --git a/package/boot/uboot-rockchip/Makefile b/package/boot/uboot-rockchip/Makefile
-index 1633d1e..0442a83 100644
---- a/package/boot/uboot-rockchip/Makefile
-+++ b/package/boot/uboot-rockchip/Makefile
-@@ -191,6 +191,13 @@ define U-Boot/rk3528/Default
-   TPL:=$(RK3528_TPL)
+diff --git a/package/boot/arm-trusted-firmware-rockchip/Makefile b/package/boot/arm-trusted-firmware-rockchip/Makefile
+index 94a4ab8e98..69588410cb 100644
+--- a/package/boot/arm-trusted-firmware-rockchip/Makefile
++++ b/package/boot/arm-trusted-firmware-rockchip/Makefile
+@@ -51,6 +51,12 @@ define Trusted-Firmware-A/rk3399
+   LOADER:=rk33/$(RK3399_LOADER)
  endef
  
++define Trusted-Firmware-A/rk3528
++  BUILD_SUBTARGET:=armv8
++  ATF:=rk35/$(RK3528_ATF)
++  TPL:=rk35/$(RK3528_TPL)
++endef
++
+ define Trusted-Firmware-A/rk3566
+   BUILD_SUBTARGET:=armv8
+   ATF:=rk35/$(RK3566_ATF)
+@@ -81,6 +87,7 @@ TFA_TARGETS:= \
+ 	rk3308-rock-pi-s \
+ 	rk3328 \
+ 	rk3399 \
++	rk3528 \
+ 	rk3566 \
+ 	rk3568 \
+ 	rk3568-e25 \
+diff --git a/package/boot/arm-trusted-firmware-rockchip/atf-version.mk b/package/boot/arm-trusted-firmware-rockchip/atf-version.mk
+index 9e25a80ffe..e8223026ba 100644
+--- a/package/boot/arm-trusted-firmware-rockchip/atf-version.mk
++++ b/package/boot/arm-trusted-firmware-rockchip/atf-version.mk
+@@ -10,6 +10,9 @@ RK3399_ATF:=rk3399_bl31_v1.36.elf
+ RK3399_TPL:=rk3399_ddr_800MHz_v1.30.bin
+ RK3399_LOADER:=rk3399_miniloader_v1.30.bin
+ 
++RK3528_ATF:=rk3528_bl31_v1.20.elf
++RK3528_TPL:=rk3528_ddr_1056MHz_v1.11.bin
++
+ RK3566_ATF:=rk3568_bl31_v1.44.elf
+ RK3566_TPL:=rk3566_ddr_1056MHz_v1.21.bin
+ 
+diff --git a/package/boot/uboot-rockchip/Makefile b/package/boot/uboot-rockchip/Makefile
+index c86e2a4700..27433ea416 100644
+--- a/package/boot/uboot-rockchip/Makefile
++++ b/package/boot/uboot-rockchip/Makefile
+@@ -175,6 +175,23 @@ define U-Boot/rockpro64-rk3399
+ endef
+ 
+ 
++# RK3528 boards
++
++define U-Boot/rk3528/Default
++  BUILD_SUBTARGET:=armv8
++  DEPENDS:=+PACKAGE_u-boot-$(1):trusted-firmware-a-rk3528
++  ATF:=$(RK3528_ATF)
++  TPL:=$(RK3528_TPL)
++endef
++
 +define U-Boot/hinlink-h28k-rk3528
 +  $(U-Boot/rk3528/Default)
 +  NAME:=HINLINK H28K
@@ -13,20 +61,21 @@ index 1633d1e..0442a83 100644
 +    hinlink_h28k
 +endef
 +
- define U-Boot/mangopi-m28c-rk3528
-   $(U-Boot/rk3528/Default)
-   NAME:=MangoPi M28C
-@@ -537,6 +544,7 @@ UBOOT_TARGETS := \
++
+ # RK3566 boards
+ 
+ define U-Boot/rk3566/Default
+@@ -459,6 +476,7 @@ UBOOT_TARGETS := \
    roc-cc-rk3328 \
    rock64-rk3328 \
    rock-pi-e-rk3328 \
 +  hinlink-h28k-rk3528 \
-   mangopi-m28c-rk3528 \
-   mangopi-m28k-rk3528 \
-   radxa-e20c-rk3528 \
+   nanopi-r3s-rk3566 \
+   radxa-cm3-io-rk3566 \
+   radxa-zero-3-rk3566 \
 diff --git a/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k-u-boot.dtsi b/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k-u-boot.dtsi
 new file mode 100644
-index 0000000..3e2fbd8
+index 0000000000..3e2fbd81da
 --- /dev/null
 +++ b/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k-u-boot.dtsi
 @@ -0,0 +1,11 @@
@@ -43,7 +92,7 @@ index 0000000..3e2fbd8
 +};
 diff --git a/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k.dts b/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k.dts
 new file mode 100644
-index 0000000..e387da5
+index 0000000000..e387da51fc
 --- /dev/null
 +++ b/package/boot/uboot-rockchip/src/arch/arm/dts/rk3528-hinlink-h28k.dts
 @@ -0,0 +1,278 @@
@@ -327,7 +376,7 @@ index 0000000..e387da5
 +};
 diff --git a/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig b/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig
 new file mode 100644
-index 0000000..012dc77
+index 0000000000..012dc7796d
 --- /dev/null
 +++ b/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig
 @@ -0,0 +1,65 @@

@@ -1,6 +1,6 @@
 diff --git a/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3528-hinlink-h28k.dts b/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3528-hinlink-h28k.dts
 new file mode 100644
-index 0000000..a9e4979
+index 0000000000..ec36abbdfe
 --- /dev/null
 +++ b/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3528-hinlink-h28k.dts
 @@ -0,0 +1,342 @@
