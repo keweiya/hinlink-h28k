@@ -33,10 +33,15 @@ on:
         default: ''
         type: string
       rootfs_partsize:
-        description: 'RootFS 分区大小，单位 MiB；留空则使用 ImageBuilder/官方默认值'
-        required: false
-        default: ''
-        type: string
+        description: 'RootFS 分区大小'
+        required: true
+        default: '2G'
+        type: choice
+        options:
+          - 512M
+          - 1G
+          - 2G
+          - 4G
       upload_release:
         description: '发布到 GitHub Release'
         required: true
@@ -125,17 +130,18 @@ jobs:
           echo '=== PACKAGES ==='
           echo "$PACKAGES"
 
-          ROOTFS_PARTSIZE='${{ inputs.rootfs_partsize }}'
-          if [ -n "$ROOTFS_PARTSIZE" ] && ! grep -Eq '^[0-9]+$' <<< "$ROOTFS_PARTSIZE"; then
-            echo "rootfs_partsize must be empty or a positive integer MiB value: $ROOTFS_PARTSIZE" >&2
-            exit 1
-          fi
+          case '${{ inputs.rootfs_partsize }}' in
+            512M) ROOTFS_PARTSIZE=512 ;;
+            1G) ROOTFS_PARTSIZE=1024 ;;
+            2G) ROOTFS_PARTSIZE=2048 ;;
+            4G) ROOTFS_PARTSIZE=4096 ;;
+            *)
+              echo 'Unsupported rootfs_partsize: ${{ inputs.rootfs_partsize }}' >&2
+              exit 1
+              ;;
+          esac
           echo "rootfs_partsize=${ROOTFS_PARTSIZE}" >> "$GITHUB_OUTPUT"
-          if [ -n "$ROOTFS_PARTSIZE" ]; then
-            echo "ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE} MiB"
-          else
-            echo 'ROOTFS_PARTSIZE: use ImageBuilder/default official value'
-          fi
+          echo "ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE} MiB"
 
           LAN_IP="$(sed -n 's/^lan_ip=//p' config/firmware.conf | tail -n1)"
           DEFAULT_THEME="$(sed -n 's/^default_theme=//p' config/firmware.conf | tail -n1)"
@@ -155,11 +161,26 @@ jobs:
           set -euo pipefail
           docker run --rm "$IMAGE_NAME" '
             set -euo pipefail
-            test -f profiles.json
+            if [ -f profiles.json ]; then
+              profiles_json=profiles.json
+            else
+              profiles_json="$(find . -path "*/profiles.json" -type f | head -n1 || true)"
+            fi
+            if [ -z "${profiles_json:-}" ] || [ ! -f "$profiles_json" ]; then
+              echo "profiles.json not found in ImageBuilder container." >&2
+              echo "=== ImageBuilder root files ===" >&2
+              find . -maxdepth 2 -type f | sort | head -200 >&2
+              exit 1
+            fi
+            echo "profiles_json=$profiles_json"
             echo "=== ImageBuilder kernel ==="
-            jq -r .linux_kernel profiles.json
+            jq -r .linux_kernel "$profiles_json"
             echo "=== H28K profile ==="
-            jq -e .profiles.hinlink_h28k profiles.json
+            if ! jq -e .profiles.hinlink_h28k "$profiles_json"; then
+              echo "H28K profile is missing. Available profile keys:" >&2
+              jq -r ".profiles | keys[]" "$profiles_json" >&2
+              exit 1
+            fi
             make info PROFILE=hinlink_h28k
           '
 
@@ -175,14 +196,16 @@ jobs:
               set -euo pipefail
               echo "=== Build firmware with PACKAGES ==="
               echo "$PACKAGES"
-              make_args=(image PROFILE=hinlink_h28k PACKAGES="$PACKAGES" FILES=files)
-              if [ -n "${ROOTFS_PARTSIZE:-}" ]; then
-                make_args+=(ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE")
-              fi
+              make_args=(image PROFILE=hinlink_h28k PACKAGES="$PACKAGES" FILES=files ROOTFS_PARTSIZE="$ROOTFS_PARTSIZE")
               make "${make_args[@]}"
               mkdir -p /output
               cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
-              cp -av profiles.json /output/profiles.json
+              if [ -f profiles.json ]; then
+                cp -av profiles.json /output/profiles.json
+              else
+                profiles_json="$(find . -path "*/profiles.json" -type f | head -n1 || true)"
+                [ -n "$profiles_json" ] && cp -av "$profiles_json" /output/profiles.json
+              fi
               find /output -maxdepth 1 -type f -print
             '
 

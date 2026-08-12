@@ -33,6 +33,11 @@ on:
         required: true
         default: true
         type: boolean
+      prebuilt_imagebuilder_url:
+        description: '可选：已构建 ImageBuilder tarball 下载 URL；填写后跳过源码编译，直接校验并打包 Docker'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -127,6 +132,7 @@ jobs:
           echo "official_abi=$official_abi" >> "$GITHUB_OUTPUT"
 
       - name: 清理磁盘空间
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         run: |
           set -euo pipefail
           echo '=== Before cleanup ==='
@@ -137,6 +143,7 @@ jobs:
           df -h /
 
       - name: 安装源码编译依赖
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -152,12 +159,14 @@ jobs:
             texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd time
 
       - name: 克隆 ImmortalWrt release 源码
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         run: |
           set -euo pipefail
           git clone --branch '${{ steps.release.outputs.tag }}' --single-branch --depth=1 "$REPO_URL" source
           git -C source log -1 --oneline
 
       - name: 应用 HINLINK H28K 补丁
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -175,6 +184,7 @@ jobs:
           git diff --stat
 
       - name: 使用官方 feeds.buildinfo 固定 feeds
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -185,6 +195,7 @@ jobs:
           ./scripts/feeds install -a
 
       - name: 克隆自定义源码包到 package/
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -203,6 +214,7 @@ jobs:
           done < "$list"
 
       - name: 生成接近官方的 .config
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -300,6 +312,7 @@ jobs:
           grep -E '^(CONFIG_ALL_KMODS|CONFIG_ALL_NONSHARED|CONFIG_DEVEL|CONFIG_BUILDBOT|CONFIG_IB|CONFIG_SDK|CONFIG_TARGET_ALL_PROFILES|CONFIG_TARGET_PER_DEVICE_ROOTFS|CONFIG_KERNEL_BUILD_USER|CONFIG_KERNEL_BUILD_DOMAIN|CONFIG_VERSION_REPO)=' .config || true
 
       - name: 下载源码包
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         timeout-minutes: 90
         run: |
@@ -309,6 +322,7 @@ jobs:
           du -sh dl
 
       - name: 编译自定义 ImageBuilder
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         working-directory: source
         timeout-minutes: 300
         run: |
@@ -324,6 +338,7 @@ jobs:
           echo "=== Build finished: $(date) ==="
 
       - name: 校验 kernel ABI 与官方一致
+        if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
         id: abi
         working-directory: source
         run: |
@@ -335,7 +350,65 @@ jobs:
           test "$built_abi" = "$official_abi"
           echo "abi=$built_abi" >> "$GITHUB_OUTPUT"
 
-      - name: 定位 ImageBuilder 产物并校验 metadata
+      - name: 下载预构建 ImageBuilder tarball
+        if: ${{ inputs.prebuilt_imagebuilder_url != '' }}
+        id: prebuilt
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
+          mkdir -p source/bin/targets/rockchip/armv8
+          url='${{ inputs.prebuilt_imagebuilder_url }}'
+          filename="${url%%\?*}"
+          filename="${filename##*/}"
+          rm -rf /tmp/h28k-prebuilt-ib
+          mkdir -p /tmp/h28k-prebuilt-ib
+          download_path=/tmp/h28k-prebuilt-ib/download
+          if [ -n "$filename" ]; then
+            download_path="/tmp/h28k-prebuilt-ib/$filename"
+          fi
+          curl -fL "$url" -o "$download_path"
+
+          case "$download_path" in
+            *.tar.zst|*.tar.xz|*.tar.gz|*.tgz)
+              cp -av "$download_path" source/bin/targets/rockchip/armv8/
+              ;;
+            *.zip)
+              unzip -q "$download_path" -d /tmp/h28k-prebuilt-ib/unzipped
+              shopt -s nullglob
+              mapfile -t tarballs < <(find /tmp/h28k-prebuilt-ib/unzipped -type f \( -iname '*ImageBuilder*.tar.*' -o -iname '*imagebuilder*.tar.*' \) | sort)
+              if [ "${#tarballs[@]}" -eq 0 ]; then
+                echo 'No ImageBuilder tarball found in artifact zip.' >&2
+                find /tmp/h28k-prebuilt-ib/unzipped -maxdepth 4 -type f -print >&2
+                exit 1
+              fi
+              cp -av "${tarballs[0]}" source/bin/targets/rockchip/armv8/
+              profiles_json="$(find /tmp/h28k-prebuilt-ib/unzipped -type f -name profiles.json | head -n1 || true)"
+              [ -n "$profiles_json" ] && cp -av "$profiles_json" source/bin/targets/rockchip/armv8/profiles.json
+              ;;
+            *)
+              if file "$download_path" | grep -qi 'Zip archive data'; then
+                unzip -q "$download_path" -d /tmp/h28k-prebuilt-ib/unzipped
+                shopt -s nullglob
+                mapfile -t tarballs < <(find /tmp/h28k-prebuilt-ib/unzipped -type f \( -iname '*ImageBuilder*.tar.*' -o -iname '*imagebuilder*.tar.*' \) | sort)
+                if [ "${#tarballs[@]}" -eq 0 ]; then
+                  echo 'No ImageBuilder tarball found in artifact zip.' >&2
+                  find /tmp/h28k-prebuilt-ib/unzipped -maxdepth 4 -type f -print >&2
+                  exit 1
+                fi
+                cp -av "${tarballs[0]}" source/bin/targets/rockchip/armv8/
+                profiles_json="$(find /tmp/h28k-prebuilt-ib/unzipped -type f -name profiles.json | head -n1 || true)"
+                [ -n "$profiles_json" ] && cp -av "$profiles_json" source/bin/targets/rockchip/armv8/profiles.json
+              else
+                fallback="source/bin/targets/rockchip/armv8/immortalwrt-imagebuilder-${{ steps.release.outputs.version }}-rockchip-armv8.Linux-x86_64.tar.zst"
+                cp -av "$download_path" "$fallback"
+              fi
+              ;;
+          esac
+          echo 'abi=${{ steps.official.outputs.official_abi }}' >> "$GITHUB_OUTPUT"
+          ls -lh source/bin/targets/rockchip/armv8
+
+      - name: 定位 ImageBuilder 产物
         id: ib
         working-directory: source
         run: |
@@ -350,6 +423,21 @@ jobs:
           ib_tar="${files[0]}"
           echo "ImageBuilder: $ib_tar"
           echo "ib_tar=$ib_tar" >> "$GITHUB_OUTPUT"
+
+      - name: 提前上传 ImageBuilder tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: h28k-imagebuilder-${{ steps.release.outputs.tag }}-${{ matrix.strategy }}-${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}-raw
+          path: |
+            source/${{ steps.ib.outputs.ib_tar }}
+            source/bin/targets/rockchip/armv8/profiles.json
+          retention-days: 14
+
+      - name: 校验 ImageBuilder metadata
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ib_tar='${{ steps.ib.outputs.ib_tar }}'
           rm -rf /tmp/h28k-ib-check
           mkdir -p /tmp/h28k-ib-check
           case "$ib_tar" in
@@ -358,9 +446,32 @@ jobs:
             *.tar.gz|*.tgz) tar -xzf "$ib_tar" -C /tmp/h28k-ib-check --strip-components=1 ;;
             *) echo "Unsupported ImageBuilder archive: $ib_tar" >&2; exit 1 ;;
           esac
-          test -f /tmp/h28k-ib-check/profiles.json
-          test "$(jq -r '.linux_kernel.vermagic' /tmp/h28k-ib-check/profiles.json)" = '${{ steps.abi.outputs.abi }}'
-          jq -e '.profiles.hinlink_h28k' /tmp/h28k-ib-check/profiles.json >/dev/null
+          profiles_json=/tmp/h28k-ib-check/profiles.json
+          if [ ! -f "$profiles_json" ]; then
+            echo 'profiles.json is not present in ImageBuilder archive root; falling back to build output metadata.' >&2
+            profiles_json=bin/targets/rockchip/armv8/profiles.json
+          fi
+          if [ ! -f "$profiles_json" ]; then
+            echo 'profiles.json not found in ImageBuilder archive or build output.' >&2
+            echo '=== ImageBuilder archive root ===' >&2
+            find /tmp/h28k-ib-check -maxdepth 2 -type f | sort | head -200 >&2
+            echo '=== bin/targets/rockchip/armv8 ===' >&2
+            find bin/targets/rockchip/armv8 -maxdepth 2 -type f | sort >&2
+            exit 1
+          fi
+          expected_abi='${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}'
+          ib_abi="$(jq -r '.linux_kernel.vermagic // empty' "$profiles_json")"
+          echo "profiles_json=$profiles_json"
+          echo "profiles_json_abi=$ib_abi"
+          if [ "$ib_abi" != "$expected_abi" ]; then
+            echo "ImageBuilder metadata ABI mismatch: $ib_abi != $expected_abi" >&2
+            exit 1
+          fi
+          if ! jq -e '.profiles.hinlink_h28k' "$profiles_json" >/dev/null; then
+            echo 'H28K profile is missing from profiles.json. Available profile keys:' >&2
+            jq -r '.profiles | keys[]' "$profiles_json" >&2
+            exit 1
+          fi
 
       - name: 可选：使用 ImageBuilder 试构建一次 H28K 固件
         if: ${{ inputs.build_firmware_smoke_test }}
@@ -399,6 +510,10 @@ jobs:
             *.tar.xz) tar -xJf "$ib_tar" -C "$GITHUB_WORKSPACE/docker-context/imagebuilder" --strip-components=1 ;;
             *.tar.gz|*.tgz) tar -xzf "$ib_tar" -C "$GITHUB_WORKSPACE/docker-context/imagebuilder" --strip-components=1 ;;
           esac
+          if [ ! -f "$GITHUB_WORKSPACE/docker-context/imagebuilder/profiles.json" ] && [ -f bin/targets/rockchip/armv8/profiles.json ]; then
+            cp -av bin/targets/rockchip/armv8/profiles.json "$GITHUB_WORKSPACE/docker-context/imagebuilder/profiles.json"
+          fi
+          test -f "$GITHUB_WORKSPACE/docker-context/imagebuilder/profiles.json"
           cat > "$GITHUB_WORKSPACE/docker-context/Dockerfile" <<'EOF'
           FROM ubuntu:24.04
           ENV DEBIAN_FRONTEND=noninteractive
@@ -417,16 +532,16 @@ jobs:
           docker build \
             --label org.opencontainers.image.source="https://github.com/${{ github.repository }}" \
             --label org.opencontainers.image.version='${{ steps.release.outputs.tag }}' \
-            --label org.opencontainers.image.description="HINLINK H28K ImmortalWrt ImageBuilder ($STRATEGY, ABI ${{ steps.abi.outputs.abi }})" \
+            --label org.opencontainers.image.description="HINLINK H28K ImmortalWrt ImageBuilder ($STRATEGY, ABI ${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }})" \
             -t "${IMAGE_NAME}:${{ steps.release.outputs.docker_tag }}" \
-            -t "${IMAGE_NAME}:${{ steps.release.outputs.tag }}-${{ steps.abi.outputs.abi }}-${STRATEGY}" \
+            -t "${IMAGE_NAME}:${{ steps.release.outputs.tag }}-${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}-${STRATEGY}" \
             "$GITHUB_WORKSPACE/docker-context"
           docker push "${IMAGE_NAME}:${{ steps.release.outputs.docker_tag }}"
-          docker push "${IMAGE_NAME}:${{ steps.release.outputs.tag }}-${{ steps.abi.outputs.abi }}-${STRATEGY}"
+          docker push "${IMAGE_NAME}:${{ steps.release.outputs.tag }}-${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}-${STRATEGY}"
 
       - name: 上传 ImageBuilder tarball
         uses: actions/upload-artifact@v4
         with:
-          name: h28k-imagebuilder-${{ steps.release.outputs.tag }}-${{ matrix.strategy }}-${{ steps.abi.outputs.abi }}
+          name: h28k-imagebuilder-${{ steps.release.outputs.tag }}-${{ matrix.strategy }}-${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}
           path: source/${{ steps.ib.outputs.ib_tar }}
           retention-days: 7
