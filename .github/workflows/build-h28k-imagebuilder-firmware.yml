@@ -38,7 +38,7 @@ on:
           - '2048'
           - '4096'
       include_third_party_pkgs:
-        description: '额外编译并添加第三方 USB 驱动和 LuCI 插件主题'
+        description: '额外编译并添加第三方 LuCI 插件与主题'
         required: true
         default: false
         type: boolean
@@ -106,7 +106,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-pyelftools python3-pip rsync swig python3-dev python3-setuptools
 
-      - name: 宿主环境：下载 SDK 并增量编译第三方包
+      - name: 宿主环境：下载 SDK 并增量编译纯脚本第三方包
         if: ${{ inputs.include_third_party_pkgs }}
         run: |
           set -euo pipefail
@@ -120,17 +120,17 @@ jobs:
           SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
           echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
 
-          # 2. 从已锁定的源下载 SDK
+          # 2. 下载 SDK
           echo "=== 从已锁定的源下载 SDK ==="
           curl -fsSL --connect-timeout 10 "${WORKING_MIRROR}/${PATH_TARGET}/${SDK_FILENAME}" -o /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk_archive.tar --strip-components=1 -C /tmp/sdk/
 
-          # 3. 克隆第三方源码包至 package 目录
+          # 3. 克隆纯脚本第三方源码包
           echo "=== 克隆第三方源码包 ==="
           mkdir -p /tmp/sdk/package/custom
-          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/luci-app-nikki
+          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/nikki
           git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git /tmp/sdk/package/custom/luci-theme-design
           
           git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/fluent_src
@@ -140,50 +140,43 @@ jobs:
             cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent
           fi
 
-          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu
-          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu
-
-          # 4. 建立索引并应用配置
+          # 4. 配置 SDK 索引
           echo "=== 使用 SDK 建立包索引并配置 ==="
           cd /tmp/sdk
-          
-          # 更新包数据库索引
           ./scripts/feeds update -i >/dev/null 2>&1 || true
 
-          # 启用要编译的软件包
-          echo "CONFIG_PACKAGE_luci-app-nikki=m" >> .config
+          echo "CONFIG_PACKAGE_nikki=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-design=m" >> .config
           echo "CONFIG_PACKAGE_luci-theme-fluent=m" >> .config
-          echo "CONFIG_PACKAGE_kmod-rtl8821cu=m" >> .config
-          echo "CONFIG_PACKAGE_kmod-rtl88x2bu=m" >> .config
 
           make defconfig >/dev/null 2>&1 || true
 
-          # 5. 编译第三方软件包
-          echo "=== 正在编译第三方软件包 ==="
-          
-          # 阶段 1：静默多线程批量编译自定义包
-          echo ">>> [阶段 1] 正在启动多线程并行编译 (-j$(nproc))..."
-          if make package/compile IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
-            echo "✅ 第三方包多线程编译成功！"
-          else
-            echo "--------------------------------------------------"
-            echo "⚠️ 批量多线程编译未全部完成，正在切换至 [阶段 2] 单线程排查模式..."
-            echo "--------------------------------------------------"
+          # 5. 逐个编译第三方包并输出实时进度
+          CUSTOM_DIRS=("nikki" "luci-theme-design" "luci-theme-fluent")
+          total=${#CUSTOM_DIRS[@]}
+          idx=1
+
+          for pkg_dir in "${CUSTOM_DIRS[@]}"; do
+            echo "=================================================="
+            echo ">>> [$idx/$total] 正在编译第三方包: $pkg_dir"
+            echo "=================================================="
             
-            # 针对自定义包依次编译，若仍失败则直接阻断退出
-            for dir in package/custom/*; do
-              [ -d "$dir" ] || continue
-              pkg_name=$(basename "$dir")
-              echo "正在单线程编译/排查: $pkg_name ..."
-              if ! make "package/custom/$pkg_name/compile" IGNORE_ERRORS=m -j1 V=s; then
-                echo "❌ 错误：包 [$pkg_name] 编译彻底失败！阻断构建程序！"
+            if make "package/custom/$pkg_dir/compile" IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
+              echo "✅ 包 [$pkg_dir] 编译成功！"
+            else
+              echo "--------------------------------------------------"
+              echo "⚠️ 多线程编译未通过，切换到单线程排查 ($pkg_dir, V=s)..."
+              echo "--------------------------------------------------"
+              if ! make "package/custom/$pkg_dir/compile" IGNORE_ERRORS=m -j1 V=s; then
+                echo "❌ 错误：第三方包 [$pkg_dir] 编译彻底失败！阻断构建！"
                 exit 1
               fi
-            done
-          fi
+              echo "✅ 包 [$pkg_dir] 单线程补编译成功！"
+            fi
+            idx=$((idx + 1))
+          done
 
-          # 6. 收集编译好的 .apk 包
+          # 6. 收集生成的 .apk 包
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
           echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
@@ -213,15 +206,15 @@ jobs:
             kmod-mt7601u
             kmod-mt76x2u
             rtl8192cu-firmware
+            kmod-rtw88-8821cu
+            kmod-rtw88-8822bu
           )
 
           if [ "$INCLUDE_THIRD_PARTY" = "true" ]; then
             EXTRA_PACKAGES=(
-              luci-app-nikki
+              nikki
               luci-theme-design
               luci-theme-fluent
-              kmod-rtl8821cu
-              kmod-rtl88x2bu
             )
             ALL_PACKAGES=("${BASE_PACKAGES[@]}" "${EXTRA_PACKAGES[@]}")
           else
@@ -252,6 +245,7 @@ jobs:
             fi
 
             if [ -d packages/extra ]; then
+              echo "=== 正在将宿主编译的第三方 apk 注入本地仓库 ==="
               cp -av packages/extra/* packages/ 2>/dev/null || true
             fi
 
