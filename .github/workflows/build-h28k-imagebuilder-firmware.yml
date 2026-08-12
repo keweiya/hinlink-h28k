@@ -63,7 +63,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 宿主环境：智能多源下载 SDK 并增量编译第三方源码
+      - name: 宿主环境：锁定可用源下载 SDK 并增量编译第三方包
         if: ${{ inputs.include_third_party_pkgs }}
         run: |
           set -euo pipefail
@@ -71,44 +71,43 @@ jobs:
 
           RELEASE_VER="${{ inputs.target_tag }}"
           RELEASE_VER="${RELEASE_VER#v}"
-          
-          # 定义首选官网 + 6 大备用镜像站的智能下载函数
-          smart_fetch() {
-            local path_suffix="$1"
-            local dest="$2"
-            local mirrors=(
-              "https://downloads.immortalwrt.org"
-              "https://mirrors.ustc.edu.cn/immortalwrt"
-              "https://mirrors.nju.edu.cn/immortalwrt"
-              "https://mirrors.sjtug.sjtu.edu.cn/immortalwrt"
-              "https://mirrors.tuna.tsinghua.edu.cn/immortalwrt"
-              "https://mirrors.vsean.net/openwrt"
-            )
-            for m in "${mirrors[@]}"; do
-              echo "尝试链接: ${m}/${path_suffix}"
-              if curl -fsSL --connect-timeout 5 --retry 1 "${m}/${path_suffix}" -o "$dest"; then
-                echo "✅ 下载成功，来自源: ${m}"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          echo "=== 1. 宿主环境：下载 sha256sums 并精准解析 SDK 文件名 ==="
           PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
-          smart_fetch "${PATH_TARGET}/sha256sums" /tmp/sha256sums
 
-          # 清理通配符 * 和多余空格，获取纯净的文件名
-          SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
-          echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
+          # 1. 探测并锁定最佳镜像源
+          MIRRORS=(
+            "https://downloads.immortalwrt.org"
+            "https://mirrors.ustc.edu.cn/immortalwrt"
+            "https://mirrors.nju.edu.cn/immortalwrt"
+            "https://mirrors.sjtug.sjtu.edu.cn/immortalwrt"
+            "https://mirrors.tuna.tsinghua.edu.cn/immortalwrt"
+            "https://mirrors.vsean.net/openwrt"
+          )
 
-          if [ -z "$SDK_FILENAME" ]; then
-            echo "错误：无法在 sha256sums 中解析到 SDK 文件名！"
+          WORKING_MIRROR=""
+          echo "=== 1. 正在探测并锁定最快可用镜像源 ==="
+          for m in "${MIRRORS[@]}"; do
+            echo "尝试探测源: ${m}/${PATH_TARGET}/sha256sums"
+            if curl -fsSL --connect-timeout 4 --retry 0 "${m}/${PATH_TARGET}/sha256sums" -o /tmp/sha256sums; then
+              WORKING_MIRROR="$m"
+              echo "✅ 成功锁定首个可用源: [ ${WORKING_MIRROR} ]"
+              break
+            else
+              echo "⚠️ 源连接超时或不可用，跳过: ${m}"
+            fi
+          done
+
+          if [ -z "$WORKING_MIRROR" ]; then
+            echo "❌ 错误：所有已知镜像源均无法连接！"
             exit 1
           fi
 
-          echo "=== 2. 多源回退机制下载 SDK: ${SDK_FILENAME} ==="
-          smart_fetch "${PATH_TARGET}/${SDK_FILENAME}" /tmp/sdk_archive.tar
+          # 2. 精准解析纯净的 SDK 文件名
+          SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
+          echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
+
+          # 3. 直接使用已锁定的 WORKING_MIRROR 下载 SDK，不再重复尝试挂掉的源
+          echo "=== 2. 从已锁定的源直接下载 SDK ==="
+          curl -fsSL --connect-timeout 10 "${WORKING_MIRROR}/${PATH_TARGET}/${SDK_FILENAME}" -o /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk_archive.tar --strip-components=1 -C /tmp/sdk/
@@ -130,8 +129,8 @@ jobs:
 
           echo "=== 4. 使用 SDK 增量编译生成 .apk 包 ==="
           cd /tmp/sdk
-          ./scripts/feeds update -a || true
-          ./scripts/feeds install -a || true
+          ./scripts/feeds update -a >/dev/null 2>&1 || true
+          ./scripts/feeds install -a >/dev/null 2>&1 || true
 
           cat << 'EOF' >> .config
           CONFIG_PACKAGE_luci-app-nikki=m
@@ -141,22 +140,35 @@ jobs:
           CONFIG_PACKAGE_kmod-rtl88x2bu=m
           EOF
 
-          make defconfig
+          make defconfig >/dev/null 2>&1
 
+          # 智能编译逻辑：优先多线程并行精简日志编译，失败才降级单线程输出详细日志
           for pkg in luci-app-nikki luci-theme-design luci-theme-fluent rtl8821cu rtl88x2bu; do
-            echo "正在 SDK 中编译: $pkg..."
-            make "package/custom/$pkg/compile" V=s -j$(nproc) || true
+            echo ">>> [阶段 1] 正在多线程并行编译第三方包: $pkg (-j$(nproc))..."
+            
+            if make "package/custom/$pkg/compile" -j$(nproc) >/dev/null 2>&1; then
+              echo "✅ 包 [$pkg] 编译成功！"
+            else
+              echo "--------------------------------------------------"
+              echo "⚠️ 多线程编译失败！自动切换到 [阶段 2] 单线程详细模式排查 ($pkg, V=s)..."
+              echo "--------------------------------------------------"
+              make "package/custom/$pkg/compile" -j1 V=s || true
+            fi
           done
 
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
           echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
 
+          # 传递可用镜像源给下一个 Step
+          echo "WORKING_MIRROR=${WORKING_MIRROR}" >> $GITHUB_ENV
+
       - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
         env:
           IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-imagebuilder:${{ inputs.target_tag }}-${{ inputs.imagebuilder_strategy }}
           INCLUDE_THIRD_PARTY: ${{ inputs.include_third_party_pkgs }}
           ROOTFS_PARTSIZE: ${{ inputs.rootfs_size }}
+          WORKING_MIRROR: ${{ env.WORKING_MIRROR }}
         run: |
           set -euo pipefail
           mkdir -p output files
@@ -197,6 +209,7 @@ jobs:
             --rm
             -e "PACKAGES=$PACKAGES_STR"
             -e "ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE"
+            -e "WORKING_MIRROR=$WORKING_MIRROR"
             -v "$GITHUB_WORKSPACE/output:/output"
             -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro"
           )
@@ -208,9 +221,10 @@ jobs:
           docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
             set -euo pipefail
             
-            # 如果官网源超时，自动替换容器内的软件源为中科大镜像源
-            if [ -f repositories.conf ]; then
-              sed -i "s|https://downloads.immortalwrt.org|https://mirrors.ustc.edu.cn/immortalwrt|g" repositories.conf || true
+            # 使用前面锁定的 WORKING_MIRROR 替换容器内的 repositories.conf，保障安装速度
+            if [ -n "$WORKING_MIRROR" ] && [ -f repositories.conf ]; then
+              echo "同步更新容器内源地址为已锁定源: $WORKING_MIRROR"
+              sed -i "s|https://downloads.immortalwrt.org|$WORKING_MIRROR|g" repositories.conf || true
             fi
 
             if [ -d packages/extra ]; then
@@ -231,7 +245,9 @@ jobs:
             [ -f profiles.json ] && cp -av profiles.json /output/profiles.json || true
           '
 
-      - name: 智能多源输出并校验固件 ABI 一致性
+      - name: 校验固件 ABI 一致性
+        env:
+          WORKING_MIRROR: ${{ env.WORKING_MIRROR }}
         run: |
           set -euo pipefail
           
@@ -239,22 +255,10 @@ jobs:
           VERSION="${{ inputs.target_tag }}"
           VERSION="${VERSION#v}"
           
-          OFFICIAL_ABI=""
-          mirrors=(
-            "https://downloads.immortalwrt.org"
-            "https://mirrors.ustc.edu.cn/immortalwrt"
-            "https://mirrors.nju.edu.cn/immortalwrt"
-            "https://mirrors.sjtug.sjtu.edu.cn/immortalwrt"
-            "https://mirrors.tuna.tsinghua.edu.cn/immortalwrt"
-            "https://mirrors.vsean.net/openwrt"
-          )
-          for m in "${mirrors[@]}"; do
-            echo "尝试从 $m 读取官方 profiles.json..."
-            if OFFICIAL_ABI=$(curl -fsSL --connect-timeout 5 "${m}/releases/${VERSION}/targets/rockchip/armv8/profiles.json" | jq -r '.linux_kernel.vermagic // empty') && [ -n "$OFFICIAL_ABI" ]; then
-              echo "✅ 成功获取官方 ABI，来自源: $m"
-              break
-            fi
-          done
+          # 直接使用已锁定的可用源抓取官方 profiles.json
+          TARGET_MIRROR="${WORKING_MIRROR:-https://downloads.immortalwrt.org}"
+          echo "正在从锁定源获取 profiles.json: ${TARGET_MIRROR}"
+          OFFICIAL_ABI=$(curl -fsSL --connect-timeout 5 "${TARGET_MIRROR}/releases/${VERSION}/targets/rockchip/armv8/profiles.json" | jq -r '.linux_kernel.vermagic // empty')
 
           echo "=================================================="
           echo "打包固件内核 ABI (vermagic): $BUILT_ABI"
