@@ -63,17 +63,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 宿主环境：锁定可用源下载 SDK 并增量编译第三方包
-        if: ${{ inputs.include_third_party_pkgs }}
+      - name: 全局探测并锁定最快可用镜像源
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/extra-apks"
-
+          
           RELEASE_VER="${{ inputs.target_tag }}"
           RELEASE_VER="${RELEASE_VER#v}"
           PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
 
-          # 1. 探测并锁定最佳镜像源
           MIRRORS=(
             "https://downloads.immortalwrt.org"
             "https://mirrors.ustc.edu.cn/immortalwrt"
@@ -84,7 +81,7 @@ jobs:
           )
 
           WORKING_MIRROR=""
-          echo "=== 1. 正在探测并锁定最快可用镜像源 ==="
+          echo "=== 开始探测可用的 ImmortalWrt 镜像源 ==="
           for m in "${MIRRORS[@]}"; do
             echo "尝试探测源: ${m}/${PATH_TARGET}/sha256sums"
             if curl -fsSL --connect-timeout 4 --retry 0 "${m}/${PATH_TARGET}/sha256sums" -o /tmp/sha256sums; then
@@ -101,67 +98,85 @@ jobs:
             exit 1
           fi
 
-          # 2. 精准解析纯净的 SDK 文件名
+          echo "WORKING_MIRROR=${WORKING_MIRROR}" >> "$GITHUB_ENV"
+
+      - name: 安装 SDK 宿主依赖环境
+        if: ${{ inputs.include_third_party_pkgs }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pyelftools python3-pip rsync swig python3-dev python3-setuptools
+
+      - name: 宿主环境：下载 SDK 并增量编译第三方包
+        if: ${{ inputs.include_third_party_pkgs }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/extra-apks"
+
+          RELEASE_VER="${{ inputs.target_tag }}"
+          RELEASE_VER="${RELEASE_VER#v}"
+          PATH_TARGET="releases/${RELEASE_VER}/targets/rockchip/armv8"
+
+          # 1. 精准解析纯净的 SDK 文件名
           SDK_FILENAME=$(grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' /tmp/sha256sums | awk '{print $2}' | sed 's/^\*//' | head -n1)
           echo "解析得到的纯净 SDK 文件名: [${SDK_FILENAME}]"
 
-          # 3. 直接使用已锁定的 WORKING_MIRROR 下载 SDK，不再重复尝试挂掉的源
-          echo "=== 2. 从已锁定的源直接下载 SDK ==="
+          # 2. 从已锁定的源直接下载 SDK
+          echo "=== 从已锁定的源下载 SDK ==="
           curl -fsSL --connect-timeout 10 "${WORKING_MIRROR}/${PATH_TARGET}/${SDK_FILENAME}" -o /tmp/sdk_archive.tar
 
           mkdir -p /tmp/sdk
           tar -xf /tmp/sdk_archive.tar --strip-components=1 -C /tmp/sdk/
 
-          echo "=== 3. 克隆第三方源码包 ==="
+          # 3. 克隆第三方源码包
+          echo "=== 克隆第三方源码包 ==="
           mkdir -p /tmp/sdk/package/custom
-          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/luci-app-nikki || true
-          git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git /tmp/sdk/package/custom/luci-theme-design || true
+          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/luci-app-nikki
+          git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git /tmp/sdk/package/custom/luci-theme-design
           
-          git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/fluent_src || true
+          git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/fluent_src
           if [ -d "/tmp/fluent_src/package/luci-theme-fluent" ]; then
             cp -r /tmp/fluent_src/package/luci-theme-fluent /tmp/sdk/package/custom/
           else
-            cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent || true
+            cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent
           fi
 
-          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu || true
-          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu || true
+          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu
+          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu
 
-          echo "=== 4. 使用 SDK 增量编译生成 .apk 包 ==="
+          # 4. 使用 SDK 增量编译生成 .apk 包
+          echo "=== 使用 SDK 增量编译生成 .apk 包 ==="
           cd /tmp/sdk
-          ./scripts/feeds update -a >/dev/null 2>&1 || true
-          ./scripts/feeds install -a >/dev/null 2>&1 || true
+          ./scripts/feeds update -a >/dev/null 2>&1
+          ./scripts/feeds install -a >/dev/null 2>&1
 
-          cat << 'EOF' >> .config
-          CONFIG_PACKAGE_luci-app-nikki=m
-          CONFIG_PACKAGE_luci-theme-design=m
-          CONFIG_PACKAGE_luci-theme-fluent=m
-          CONFIG_PACKAGE_kmod-rtl8821cu=m
-          CONFIG_PACKAGE_kmod-rtl88x2bu=m
-          EOF
+          echo "CONFIG_PACKAGE_luci-app-nikki=m" >> .config
+          echo "CONFIG_PACKAGE_luci-theme-design=m" >> .config
+          echo "CONFIG_PACKAGE_luci-theme-fluent=m" >> .config
+          echo "CONFIG_PACKAGE_kmod-rtl8821cu=m" >> .config
+          echo "CONFIG_PACKAGE_kmod-rtl88x2bu=m" >> .config
 
           make defconfig >/dev/null 2>&1
 
-          # 智能编译逻辑：优先多线程并行精简日志编译，失败才降级单线程输出详细日志
+          # 智能编译逻辑：多线程静默编译，失败则切换单线程排查；若最终仍失败则 exit 1 阻断退出
           for pkg in luci-app-nikki luci-theme-design luci-theme-fluent rtl8821cu rtl88x2bu; do
-            echo ">>> [阶段 1] 正在多线程并行编译第三方包: $pkg (-j$(nproc))..."
+            echo ">>> [阶段 1] 正在启动多线程并行编译第三方包: $pkg (-j$(nproc))..."
             
-            if make "package/custom/$pkg/compile" -j$(nproc) >/dev/null 2>&1; then
-              echo "✅ 包 [$pkg] 编译成功！"
+            if make package/custom/$pkg/compile IGNORE_ERRORS=m -j$(nproc) >/dev/null 2>&1; then
+              echo "✅ 包 [$pkg] 多线程编译成功！"
             else
               echo "--------------------------------------------------"
-              echo "⚠️ 多线程编译失败！自动切换到 [阶段 2] 单线程详细模式排查 ($pkg, V=s)..."
+              echo "⚠️ 包 [$pkg] 多线程编译失败！切换到 [阶段 2] 单线程详细日志排查 ($pkg, V=s)..."
               echo "--------------------------------------------------"
-              make "package/custom/$pkg/compile" -j1 V=s || true
+              if ! make package/custom/$pkg/compile IGNORE_ERRORS=m -j1 V=s; then
+                echo "❌ 错误：包 [$pkg] 编译彻底失败！阻断构建程序！"
+                exit 1
+              fi
             fi
           done
 
           find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
           echo "=== 宿主环境最终生成的 extra-apks 列表 ==="
           ls -la "$GITHUB_WORKSPACE/extra-apks/"
-
-          # 传递可用镜像源给下一个 Step
-          echo "WORKING_MIRROR=${WORKING_MIRROR}" >> $GITHUB_ENV
 
       - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
         env:
@@ -221,9 +236,8 @@ jobs:
           docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
             set -euo pipefail
             
-            # 使用前面锁定的 WORKING_MIRROR 替换容器内的 repositories.conf，保障安装速度
             if [ -n "$WORKING_MIRROR" ] && [ -f repositories.conf ]; then
-              echo "同步更新容器内源地址为已锁定源: $WORKING_MIRROR"
+              echo "=== 正在将 ImageBuilder 软件源替换为锁定源: $WORKING_MIRROR ==="
               sed -i "s|https://downloads.immortalwrt.org|$WORKING_MIRROR|g" repositories.conf || true
             fi
 
@@ -255,7 +269,6 @@ jobs:
           VERSION="${{ inputs.target_tag }}"
           VERSION="${VERSION#v}"
           
-          # 直接使用已锁定的可用源抓取官方 profiles.json
           TARGET_MIRROR="${WORKING_MIRROR:-https://downloads.immortalwrt.org}"
           echo "正在从锁定源获取 profiles.json: ${TARGET_MIRROR}"
           OFFICIAL_ABI=$(curl -fsSL --connect-timeout 5 "${TARGET_MIRROR}/releases/${VERSION}/targets/rockchip/armv8/profiles.json" | jq -r '.linux_kernel.vermagic // empty')
