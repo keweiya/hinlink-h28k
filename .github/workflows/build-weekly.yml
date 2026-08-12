@@ -222,6 +222,12 @@ jobs:
             4G) ROOTFS_PARTSIZE=4096 ;;
             *) echo "不支持的 RootFS 大小：${ROOTFS_PARTSIZE_LABEL}" >&2; exit 1 ;;
           esac
+          sed -i '/^CONFIG_TARGET_ROOTFS_SQUASHFS=/d; /^# CONFIG_TARGET_ROOTFS_SQUASHFS is not set/d' .config
+          sed -i '/^CONFIG_TARGET_ROOTFS_EXT4FS=/d; /^# CONFIG_TARGET_ROOTFS_EXT4FS is not set/d' .config
+          sed -i '/^CONFIG_TARGET_ROOTFS_TARGZ=/d; /^# CONFIG_TARGET_ROOTFS_TARGZ is not set/d' .config
+          echo 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' >> .config
+          echo 'CONFIG_TARGET_ROOTFS_EXT4FS=y' >> .config
+          echo 'CONFIG_TARGET_ROOTFS_TARGZ=y' >> .config
           sed -i '/^CONFIG_TARGET_ROOTFS_PARTSIZE=/d' .config
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE}" >> .config
           echo "ROOTFS_PARTSIZE=${ROOTFS_PARTSIZE} MiB"
@@ -311,13 +317,25 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           shopt -s nullglob
-          FIRMWARE_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz)
-          if [ "${#FIRMWARE_FILES[@]}" -eq 0 ]; then
-            echo "未找到 HINLINK H28K sysupgrade 固件"
+          SQUASHFS_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*squashfs*sysupgrade.img.gz)
+          EXT4_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*ext4*sysupgrade.img.gz)
+          LXC_FILES=(bin/targets/rockchip/armv8/*rootfs.tar.gz)
+          if [ "${#SQUASHFS_FILES[@]}" -eq 0 ]; then
+            echo "未找到 HINLINK H28K squashfs sysupgrade 固件"
             ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
             exit 1
           fi
-          ls -lh "${FIRMWARE_FILES[@]}"
+          if [ "${#EXT4_FILES[@]}" -eq 0 ]; then
+            echo "未找到 HINLINK H28K ext4 sysupgrade 固件"
+            ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
+            exit 1
+          fi
+          if [ "${#LXC_FILES[@]}" -eq 0 ]; then
+            echo "未找到 HINLINK H28K LXC rootfs tar.gz"
+            ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
+            exit 1
+          fi
+          ls -lh "${SQUASHFS_FILES[@]}" "${EXT4_FILES[@]}" "${LXC_FILES[@]}"
           echo "BUILD_DATE=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_ENV"
           echo "UPSTREAM_HASH=$(git log -1 --format='%h')" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
@@ -328,8 +346,10 @@ jobs:
       - name: 上传固件构件
         uses: actions/upload-artifact@v4
         with:
-          name: HINLINK H28K 固件-${{ env.RELEASE_TAG }}
-          path: source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
+          name: HINLINK-H28K-source-${{ env.RELEASE_TAG }}-${{ env.KERNEL_ABI }}-${{ env.ROOTFS_PARTSIZE_LABEL }}
+          path: |
+            source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
+            source/bin/targets/rockchip/armv8/*rootfs.tar.gz
           retention-days: 14
 
       - name: 生成编译总结
@@ -364,9 +384,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: h28k-${{ env.RELEASE_TAG }}-${{ env.BUILD_DATE }}
-          name: "HINLINK H28K 固件 ${{ env.RELEASE_TAG }} (${{ env.BUILD_DATE }})"
+          name: "HINLINK H28K 源码编译固件 ${{ env.RELEASE_TAG }} (${{ env.BUILD_DATE }})"
           body_path: ${{ steps.summary.outputs.body }}
-          files: source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
+          files: |
+            source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
+            source/bin/targets/rockchip/armv8/*rootfs.tar.gz
           make_latest: true
           fail_on_unmatched_files: true
         env:

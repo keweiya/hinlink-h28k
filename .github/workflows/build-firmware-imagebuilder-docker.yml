@@ -444,11 +444,22 @@ jobs:
           echo '产物：'
           ls -lh output
           shopt -s nullglob
-          firmware=(output/*hinlink*h28k*sysupgrade.img.gz output/*hinlink_h28k*sysupgrade.img.gz)
-          if [ "${#firmware[@]}" -eq 0 ]; then
-            echo '未找到 H28K sysupgrade 固件' >&2
+          squashfs=(output/*hinlink*h28k*squashfs*sysupgrade.img.gz output/*hinlink_h28k*squashfs*sysupgrade.img.gz)
+          ext4=(output/*hinlink*h28k*ext4*sysupgrade.img.gz output/*hinlink_h28k*ext4*sysupgrade.img.gz)
+          lxc=(output/*rootfs.tar.gz)
+          if [ "${#squashfs[@]}" -eq 0 ]; then
+            echo '未找到 H28K squashfs sysupgrade 固件' >&2
             exit 1
           fi
+          if [ "${#ext4[@]}" -eq 0 ]; then
+            echo '未找到 H28K ext4 sysupgrade 固件' >&2
+            exit 1
+          fi
+          if [ "${#lxc[@]}" -eq 0 ]; then
+            echo '未找到 H28K LXC rootfs tar.gz' >&2
+            exit 1
+          fi
+          ls -lh "${squashfs[@]}" "${ext4[@]}" "${lxc[@]}"
           test -f output/profiles.json
           ib_abi="$(jq -r '.linux_kernel.vermagic // empty' output/profiles.json)"
           official_abi='${{ steps.official.outputs.official_abi }}'
@@ -467,7 +478,7 @@ jobs:
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: HINLINK-H28K-${{ steps.release.outputs.tag }}-${{ steps.check.outputs.abi }}-${{ inputs.rootfs_partsize }}
+          name: HINLINK-H28K-imagebuilder-${{ steps.release.outputs.tag }}-${{ steps.check.outputs.abi }}-${{ inputs.rootfs_partsize }}
           path: output/*
           retention-days: 14
 
@@ -509,7 +520,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: h28k-ib-${{ steps.release.outputs.tag }}-${{ steps.release.outputs.date }}
-          name: HINLINK H28K 固件 ${{ steps.release.outputs.tag }} (${{ steps.release.outputs.date }})
+          name: HINLINK H28K ImageBuilder 固件 ${{ steps.release.outputs.tag }} (${{ steps.release.outputs.date }})
           body_path: ${{ steps.summary.outputs.body }}
           files: output/*
           make_latest: true
