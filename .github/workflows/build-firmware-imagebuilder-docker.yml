@@ -523,11 +523,21 @@ jobs:
           set -euo pipefail
           mkdir -p summary
           manifest="$(find output -maxdepth 1 -name '*.manifest' -print -quit || true)"
+          awk '
+            /^# HINLINK H28K ImageBuilder 明确启用的软件包$/ { in_section = 1; next }
+            in_section && /^# v25 中不再使用\/当前不启用的旧包名或第三方主题记录$/ { exit }
+            in_section && /^CONFIG_PACKAGE_[^=]+=(y|m)$/ {
+              sub(/^CONFIG_PACKAGE_/, "")
+              sub(/=(y|m)$/, "")
+              print
+            }
+          ' '${{ steps.compat.outputs.firmware_packages_config }}' | sort -u > /tmp/summary-requested-packages.list
           bash scripts/firmware_summary.sh \
             summary/release-body.md \
             "$manifest" \
             /tmp/requested-packages.list \
-            /tmp/third-party-build-failed.list
+            /tmp/third-party-build-failed.list \
+            /tmp/summary-requested-packages.list
           cat summary/release-body.md >> "$GITHUB_STEP_SUMMARY"
           echo "body=summary/release-body.md" >> "$GITHUB_OUTPUT"
 

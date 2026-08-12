@@ -434,7 +434,16 @@ jobs:
         run: |
           set -euo pipefail
           manifest="$(find source/bin/targets/rockchip/armv8 -maxdepth 1 -name '*hinlink_h28k*.manifest' -print -quit || true)"
-          bash scripts/firmware_summary.sh source/bin/targets/rockchip/armv8/release-body.md "$manifest" ""
+          awk '
+            /^# HINLINK H28K ImageBuilder 明确启用的软件包$/ { in_section = 1; next }
+            in_section && /^# v25 中不再使用\/当前不启用的旧包名或第三方主题记录$/ { exit }
+            in_section && /^CONFIG_PACKAGE_[^=]+=(y|m)$/ {
+              sub(/^CONFIG_PACKAGE_/, "")
+              sub(/=(y|m)$/, "")
+              print
+            }
+          ' '${{ steps.compat.outputs.firmware_packages_config }}' | sort -u > /tmp/summary-requested-packages.list
+          bash scripts/firmware_summary.sh source/bin/targets/rockchip/armv8/release-body.md "$manifest" "" "" /tmp/summary-requested-packages.list
           cat source/bin/targets/rockchip/armv8/release-body.md >> "$GITHUB_STEP_SUMMARY"
           echo "body=source/bin/targets/rockchip/armv8/release-body.md" >> "$GITHUB_OUTPUT"
 
