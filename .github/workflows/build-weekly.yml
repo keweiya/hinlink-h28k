@@ -7,10 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       target_tag:
-        description: '指定固定源码 Tag (如 v25.12.1)'
+        description: 'ImmortalWrt 版本（支持 v25.12.x 与 v24.10.5+）'
         required: true
         default: 'v25.12.1'
-        type: string
+        type: choice
+        options:
+          - v25.12.1
+          - v25.12.0
+          - v24.10.6
+          - v24.10.5
       use_cache:
         description: '使用 GitHub Actions 源码缓存'
         required: true
@@ -103,6 +108,36 @@ jobs:
           echo "path_target=$PATH_TARGET" >> "$GITHUB_OUTPUT"
           echo "版本：$RELEASE_TAG"
 
+      - name: 选择版本适配文件
+        id: compat
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.release.outputs.tag }}'
+          case "$TAG" in
+            v25.12.*)
+              PATCH_DIR='patches-25.12'
+              FIRMWARE_PACKAGES_CONFIG='config/h28k-firmware.packages'
+              SUPPORT_RANGE='v25.12.x'
+              ;;
+            v24.10.5|v24.10.6|v24.10.[7-9]|v24.10.[1-9][0-9]*)
+              PATCH_DIR='patches-24.10.5-plus'
+              FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-24.10.config'
+              SUPPORT_RANGE='v24.10.5+'
+              ;;
+            *)
+              echo "不支持的版本：$TAG。当前仅支持 v25.12.x 与 v24.10.5+。" >&2
+              exit 1
+              ;;
+          esac
+          test -d "$PATCH_DIR"
+          test -f "$FIRMWARE_PACKAGES_CONFIG"
+          echo "patch_dir=$PATCH_DIR" >> "$GITHUB_OUTPUT"
+          echo "firmware_packages_config=$FIRMWARE_PACKAGES_CONFIG" >> "$GITHUB_OUTPUT"
+          echo "support_range=$SUPPORT_RANGE" >> "$GITHUB_OUTPUT"
+          echo "补丁目录：$PATCH_DIR"
+          echo "固件包配置：$FIRMWARE_PACKAGES_CONFIG"
+          echo "支持范围：$SUPPORT_RANGE"
+
       - name: 选择镜像源
         id: mirror
         run: |
@@ -149,7 +184,7 @@ jobs:
         working-directory: source
         run: |
           set -eu
-          for patch in "$GITHUB_WORKSPACE"/patches/*.patch; do
+          for patch in "$GITHUB_WORKSPACE/${{ steps.compat.outputs.patch_dir }}"/*.patch; do
             [ -f "$patch" ] || continue
             echo "应用补丁：$(basename "$patch")"
             git apply --check --3way "$patch" || {

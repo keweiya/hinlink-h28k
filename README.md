@@ -4,6 +4,18 @@
 
 > 本项目仅供个人使用与配置留档，不面向通用环境，也不提供技术支持；请自行评估适配性。
 
+## 版本支持
+
+本仓库按 ImmortalWrt/OpenWrt 版本线维护不同补丁集。不要把 `v25.12.x` 的补丁直接套到 `v24.10.x`，两条版本线的 Rockchip/U-Boot/设备树上下文不同，旧版本会出现冲突或缺文件。
+
+| 版本线 | 补丁目录 | 固件包配置 | 状态 |
+| --- | --- | --- | --- |
+| `v25.12.x` | `patches-25.12/` | `config/h28k-firmware.packages` | 支持 |
+| `v24.10.5+` | `patches-24.10.5-plus/` | `config/immortalwrt-24.10.config` | 支持 |
+| `v24.10.0` - `v24.10.4` | 无 | 无 | 不支持当前补丁集 |
+
+`v24.10.0` 缺少 `target/linux/rockchip/armv8/base-files/etc/init.d/phy-leds`，`v24.10.1` - `v24.10.4` 在 `package/boot/uboot-rockchip/Makefile` 附近与当前补丁上下文不兼容。因此当前 `v24.10` 补丁集明确标记为 `v24.10.5+`。
+
 ## 补丁说明
 
 | 补丁 | 说明 |
@@ -14,15 +26,18 @@
 | `0040-rockchip-add-HINLINK-H28K-image.patch` | 添加 `hinlink_h28k` 固件设备配置。 |
 | `0050-rockchip-configure-HINLINK-H28K-RJ45-LEDs.patch` | 配置两个 RJ45 接口的链路灯和活动灯。 |
 
+补丁文件名在不同版本线中保持一致，实际内容按目录区分。
+
 ## 自动编译
 
 GitHub Actions 每周自动运行一次，也可以在 Actions 页面手动触发。每次构建会：
 
-1. 自动选择 ImmortalWrt 最新正式版 `vX.Y.Z` 标签。
-2. 使用对应正式版的官方 `config.buildinfo`。
-3. 应用 HINLINK H28K 补丁。
-4. 加载固件参数和额外 Git 软件包。
-5. 编译完整固件并上传到 Artifacts 和 Releases。
+1. 使用手动选择的 ImmortalWrt 版本标签（例如 `v25.12.1`、`v24.10.6`）。
+2. 根据版本自动选择对应补丁目录和配置文件。
+3. 使用对应正式版的官方 `config.buildinfo`。
+4. 应用 HINLINK H28K 补丁。
+5. 加载固件参数和额外 Git 软件包。
+6. 编译完整固件并上传到 Artifacts 和 Releases。
 
 ## 构建配置
 
@@ -32,6 +47,22 @@ GitHub Actions 每周自动运行一次，也可以在 Actions 页面手动触�
 | --- | --- |
 | `packages.conf` | 每行一条完整的 `git clone` 命令。 |
 | `h28k-imagebuilder.config` | H28K 目标和 ImageBuilder 构建配置。 |
+| `h28k-firmware.packages` | `v25.12.x` 固件 ImageBuilder 软件包配置。 |
+| `immortalwrt-24.10.config` | `v24.10.5+` 固件 ImageBuilder 软件包配置。 |
+
+## 本地验证补丁
+
+示例：在本地 ImmortalWrt 源码仓库中验证某个版本线补丁是否可应用：
+
+```bash
+git checkout v24.10.6
+git reset --hard
+for patch in /path/to/hinlink-h28k/patches-24.10.5-plus/*.patch; do
+  git apply --check --3way "$patch"
+done
+```
+
+如果要验证 `v25.12.x`，请切到对应 `v25.12.*` 标签并使用 `patches-25.12/`。
 
 ## 默认包含
 

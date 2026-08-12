@@ -13,11 +13,6 @@ on:
           - v25.12.0
           - v24.10.6
           - v24.10.5
-          - v24.10.4
-          - v24.10.3
-          - v24.10.2
-          - v24.10.1
-          - v24.10.0
       imagebuilder_image:
         description: '自定义 ImageBuilder 镜像，留空用默认'
         required: false
@@ -94,6 +89,36 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "date=$(TZ=Asia/Hong_Kong date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
           echo "path_target=${PATH_TARGET}" >> "$GITHUB_OUTPUT"
+
+      - name: 选择版本适配文件
+        id: compat
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.release.outputs.tag }}'
+          case "$TAG" in
+            v25.12.*)
+              PATCH_DIR='patches-25.12'
+              FIRMWARE_PACKAGES_CONFIG='config/h28k-firmware.packages'
+              SUPPORT_RANGE='v25.12.x'
+              ;;
+            v24.10.5|v24.10.6|v24.10.[7-9]|v24.10.[1-9][0-9]*)
+              PATCH_DIR='patches-24.10.5-plus'
+              FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-24.10.config'
+              SUPPORT_RANGE='v24.10.5+'
+              ;;
+            *)
+              echo "不支持的版本：$TAG。当前仅支持 v25.12.x 与 v24.10.5+。" >&2
+              exit 1
+              ;;
+          esac
+          test -d "$PATCH_DIR"
+          test -f "$FIRMWARE_PACKAGES_CONFIG"
+          echo "patch_dir=$PATCH_DIR" >> "$GITHUB_OUTPUT"
+          echo "firmware_packages_config=$FIRMWARE_PACKAGES_CONFIG" >> "$GITHUB_OUTPUT"
+          echo "support_range=$SUPPORT_RANGE" >> "$GITHUB_OUTPUT"
+          echo "补丁目录：$PATCH_DIR"
+          echo "固件包配置：$FIRMWARE_PACKAGES_CONFIG"
+          echo "支持范围：$SUPPORT_RANGE"
 
       - name: 选择镜像源
         id: mirror
@@ -328,8 +353,8 @@ jobs:
           mkdir -p output files
           BASE_PACKAGES="$(
             {
-              sed -nE 's/^CONFIG_PACKAGE_([^=]+)=(y|m)$/\1/p' config/h28k-firmware.packages
-              grep -Ev '^[[:space:]]*(#|$|CONFIG_)' config/h28k-firmware.packages | grep -Ev '=' || true
+              sed -nE 's/^CONFIG_PACKAGE_([^=]+)=(y|m)$/\1/p' '${{ steps.compat.outputs.firmware_packages_config }}'
+              grep -Ev '^[[:space:]]*(#|$|CONFIG_)' '${{ steps.compat.outputs.firmware_packages_config }}' | grep -Ev '=' || true
             } | sort -u | tr '\n' ' ' | xargs
           )"
           THIRD_PARTY_PACKAGES=""
