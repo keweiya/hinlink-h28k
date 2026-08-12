@@ -38,7 +38,7 @@ on:
           - '2048'
           - '4096'
       include_third_party_pkgs:
-        description: '额外编译并添加第三方 USB 驱动与 LuCI 插件/主题'
+        description: '额外编译并添加第三方 USB 驱动和 LuCI 插件主题'
         required: true
         default: false
         type: boolean
@@ -63,7 +63,80 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 运行 Docker ImageBuilder 容器连贯执行【源码编译 + 固件打包】
+      - name: 宿主环境：下载 SDK 并增量编译第三方源码为 .apk
+        if: ${{ inputs.include_third_party_pkgs }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/extra-apks"
+
+          RELEASE_VER="${{ inputs.target_tag }}"
+          RELEASE_VER="${RELEASE_VER#v}"
+          
+          echo "=== 1. 宿主环境：获取并解压官方 SDK (${RELEASE_VER}) ==="
+          BASE_URL="https://downloads.immortalwrt.org/releases/${RELEASE_VER}/targets/rockchip/armv8"
+          
+          # 动态匹配 SDK 文件名（处理 .tar.xz 或 .tar.zst 压缩格式）
+          SDK_FILENAME=$(curl -fsSL "$BASE_URL/sha256sums" | grep -E 'immortalwrt-sdk-.*rockchip-armv8.*' | awk '{print $2}' | head -n1)
+          
+          if [ -z "$SDK_FILENAME" ]; then
+            echo "错误：无法在官方源找到对应的 SDK 包！"
+            exit 1
+          fi
+
+          echo "下载 SDK: $SDK_FILENAME"
+          curl -fsSL "$BASE_URL/$SDK_FILENAME" -o /tmp/sdk_archive
+          mkdir -p /tmp/sdk
+          tar -xf /tmp/sdk_archive --strip-components=1 -C /tmp/sdk/
+
+          echo "=== 2. 克隆第三方插件与驱动源码 ==="
+          mkdir -p /tmp/sdk/package/custom
+
+          git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git /tmp/sdk/package/custom/luci-app-nikki || true
+          git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git /tmp/sdk/package/custom/luci-theme-design || true
+          
+          git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/fluent_src || true
+          if [ -d "/tmp/fluent_src/package/luci-theme-fluent" ]; then
+            cp -r /tmp/fluent_src/package/luci-theme-fluent /tmp/sdk/package/custom/
+          else
+            cp -r /tmp/fluent_src /tmp/sdk/package/custom/luci-theme-fluent || true
+          fi
+
+          git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git /tmp/sdk/package/custom/rtl8821cu || true
+          git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git /tmp/sdk/package/custom/rtl88x2bu || true
+
+          echo "=== 3. 使用 SDK 增量编译生成 .apk 软件包 ==="
+          cd /tmp/sdk
+          
+          # 更新 feeds（确保依赖齐全）
+          ./scripts/feeds update -a || true
+          ./scripts/feeds install -a || true
+
+          # 开启包配置为模块 (=m)
+          cat << 'EOF' >> .config
+          CONFIG_PACKAGE_luci-app-nikki=m
+          CONFIG_PACKAGE_luci-theme-design=m
+          CONFIG_PACKAGE_luci-theme-fluent=m
+          CONFIG_PACKAGE_kmod-rtl8821cu=m
+          CONFIG_PACKAGE_kmod-rtl88x2bu=m
+          EOF
+
+          make defconfig
+
+          # 执行独立增量编译
+          for pkg in luci-app-nikki luci-theme-design luci-theme-fluent rtl8821cu rtl88x2bu; do
+            echo "----------------------------------------"
+            echo "正在 SDK 中编译: $pkg"
+            echo "----------------------------------------"
+            make "package/custom/$pkg/compile" V=s -j$(nproc) || true
+          done
+
+          echo "=== 4. 收集编译好的 .apk 包 ==="
+          find bin/packages/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -av {} "$GITHUB_WORKSPACE/extra-apks/" \; 2>/dev/null || true
+          
+          echo "=== 宿主编译出来的 APK 清单 ==="
+          ls -la "$GITHUB_WORKSPACE/extra-apks/"
+
+      - name: 运行 Docker ImageBuilder 容器打包固件 (Squashfs + ext4 + LXC)
         env:
           IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/h28k-imagebuilder:${{ inputs.target_tag }}-${{ inputs.imagebuilder_strategy }}
           INCLUDE_THIRD_PARTY: ${{ inputs.include_third_party_pkgs }}
@@ -111,58 +184,32 @@ jobs:
           echo "=== 拟安装软件包列表 ==="
           echo "$PACKAGES_STR"
 
-          # 3. 构造 Docker 运行参数
+          # 3. 构造 Docker 运行参数（挂载宿主编译好的 extra-apks）
           DOCKER_RUN_ARGS=(
             --rm
             -e "PACKAGES=$PACKAGES_STR"
             -e "ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE"
-            -e "INCLUDE_THIRD_PARTY=$INCLUDE_THIRD_PARTY"
             -v "$GITHUB_WORKSPACE/output:/output"
             -v "$GITHUB_WORKSPACE/files:/home/builder/imagebuilder/files:ro"
           )
 
+          if [ "$INCLUDE_THIRD_PARTY" = "true" ] && [ -d "$GITHUB_WORKSPACE/extra-apks" ]; then
+            DOCKER_RUN_ARGS+=(-v "$GITHUB_WORKSPACE/extra-apks:/home/builder/imagebuilder/packages/extra:ro")
+          fi
+
           docker run "${DOCKER_RUN_ARGS[@]}" "$IMAGE_NAME" '
             set -euo pipefail
-
-            if [ "$INCLUDE_THIRD_PARTY" = "true" ]; then
-              echo "=== 1. 正在 Docker 容器内克隆第三方插件与驱动源码 ==="
-              mkdir -p package/custom
-
-              git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-nikki.git package/custom/luci-app-nikki || true
-              git clone --depth 1 https://github.com/aijwfsibari/luci-theme-design.git package/custom/luci-theme-design || true
-              
-              # Fluent 主题处理子目录
-              git clone --depth 1 https://github.com/LazuliKao/luci-theme-fluent.git /tmp/luci-theme-fluent || true
-              if [ -d "/tmp/luci-theme-fluent/package/luci-theme-fluent" ]; then
-                cp -r /tmp/luci-theme-fluent/package/luci-theme-fluent package/custom/
-              else
-                cp -r /tmp/luci-theme-fluent package/custom/luci-theme-fluent || true
-              fi
-
-              # USB 驱动源码
-              git clone --depth 1 https://github.com/morrownr/8821cu-20210916.git package/custom/rtl8821cu || true
-              git clone --depth 1 https://github.com/morrownr/88x2bu-20210702.git package/custom/rtl88x2bu || true
-
-              echo "=== 2. 增量编译第三方软件包生成 .apk ==="
-              # 如果容器内具备 OpenWrt 编译环境（如 SDK/Build 目录），执行增量 compile
-              if [ -f "scripts/feeds" ] || [ -f "Makefile" ]; then
-                for pkg_dir in package/custom/*; do
-                  [ -d "$pkg_dir" ] || continue
-                  echo "正在编译第三方包: $(basename "$pkg_dir")..."
-                  make "package/custom/$(basename "$pkg_dir")/compile" V=s || true
-                done
-                
-                echo "=== 3. 将编译好的 .apk 自动同步并建立本地索引 ==="
-                mkdir -p packages
-                find bin/packages/ -type f -name "*.apk" -exec cp -av {} packages/ \; 2>/dev/null || true
-              fi
-            fi
-
-            echo "=== 4. 开始使用 ImageBuilder 打包多格式固件 ==="
+            echo "=== 开始使用 ImageBuilder 打包多格式固件 ==="
             echo "RootFS 大小: ${ROOTFS_PARTSIZE} MB"
             echo "软件包: $PACKAGES"
 
-            # 执行打包：开启 Squashfs, ext4 以及 LXC (tar.gz) 构建
+            # 同步宿主机 SDK 编译出的 APK 并更新本地索引
+            if [ -d packages/extra ]; then
+              echo "检测到宿主机 SDK 编译的第三方包，建立本地索引..."
+              cp -av packages/extra/* packages/ 2>/dev/null || true
+            fi
+
+            # 打包固件：开启 Squashfs, ext4 以及 LXC (tar.gz) 构建
             make image PROFILE=hinlink_h28k \
               PACKAGES="$PACKAGES" \
               FILES=files \
@@ -171,7 +218,7 @@ jobs:
               CONFIG_TARGET_ROOTFS_EXT4FS=y \
               CONFIG_TARGET_ROOTFS_TARGZ=y
 
-            # 收集生成的镜像与 Profiles 元数据
+            # 收集生成的镜像和 Profiles 元数据
             mkdir -p /output
             cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
             cp -av bin/targets/rockchip/armv8/*rootfs*.tar.gz /output/ || true
@@ -182,10 +229,8 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 1. 读取打包出的 profiles.json 中的 ABI
           BUILT_ABI=$(jq -r '.linux_kernel.vermagic // empty' output/profiles.json)
           
-          # 2. 从官方源动态读取对应 Tag 的 ABI
           VERSION="${{ inputs.target_tag }}"
           VERSION="${VERSION#v}"
           OFFICIAL_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/rockchip/armv8/profiles.json"
@@ -196,7 +241,6 @@ jobs:
           echo "官方 Release 内核 ABI (vermagic): $OFFICIAL_ABI"
           echo "=================================================="
 
-          # 3. 写入 GitHub Actions 日志面板 Summary
           echo "### 固件内核 ABI 校验结果" >> $GITHUB_STEP_SUMMARY
           echo "- **打包固件 ABI**: \`$BUILT_ABI\`" >> $GITHUB_STEP_SUMMARY
           echo "- **官方 Release ABI**: \`$OFFICIAL_ABI\`" >> $GITHUB_STEP_SUMMARY
