@@ -98,7 +98,7 @@ jobs:
           case "$TAG" in
             v25.12.*)
               PATCH_DIR='patches-25.12'
-              FIRMWARE_PACKAGES_CONFIG='config/h28k-firmware.packages'
+              FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-25.12.config'
               SUPPORT_RANGE='v25.12.x'
               ;;
             v24.10.5|v24.10.6|v24.10.[7-9]|v24.10.[1-9][0-9]*)

@@ -1,6 +1,6 @@
 # HINLINK H28K 固件
 
-本仓库用于每周自动编译 ImmortalWrt HINLINK H28K 固件（RK3528）。
+本仓库用于每日自动编译 ImmortalWrt HINLINK H28K 固件（RK3528）。
 
 > 本项目仅供个人使用与配置留档，不面向通用环境，也不提供技术支持；请自行评估适配性。
 
@@ -10,7 +10,8 @@
 
 | 版本线 | 补丁目录 | 固件包配置 | 状态 |
 | --- | --- | --- | --- |
-| `v25.12.x` | `patches-25.12/` | `config/h28k-firmware.packages` | 支持 |
+| `master` | `patches-25.12/` | `config/immortalwrt-25.12.config` | 每日默认源码编译；跳过官方 ABI 校验 |
+| `v25.12.x` | `patches-25.12/` | `config/immortalwrt-25.12.config` | 支持 |
 | `v24.10.5+` | `patches-24.10.5-plus/` | `config/immortalwrt-24.10.config` | 支持 |
 | `v24.10.0` - `v24.10.4` | 无 | 无 | 不支持当前补丁集 |
 
@@ -30,11 +31,11 @@
 
 ## 自动编译
 
-GitHub Actions 每周自动运行一次，也可以在 Actions 页面手动触发。每次构建会：
+GitHub Actions 每日自动运行一次，也可以在 Actions 页面手动触发。定时任务默认编译 ImmortalWrt `master` 源码；手动触发可选择 `master` 或已适配的正式版标签。每次构建会：
 
-1. 使用手动选择的 ImmortalWrt 版本标签（例如 `v25.12.1`、`v24.10.6`）。
+1. 使用默认 `master` 或手动选择的 ImmortalWrt 版本标签（例如 `v25.12.1`、`v24.10.6`）。
 2. 根据版本自动选择对应补丁目录和配置文件。
-3. 使用对应正式版的官方 `config.buildinfo`。
+3. 正式版使用对应版本的官方 `config.buildinfo`；`master` 使用源码仓库当前配置并跳过官方 ABI 校验。
 4. 应用 HINLINK H28K 补丁。
 5. 加载固件参数和额外 Git 软件包。
 6. 编译完整固件并上传到 Artifacts 和 Releases。
@@ -47,7 +48,7 @@ GitHub Actions 每周自动运行一次，也可以在 Actions 页面手动触�
 | --- | --- |
 | `packages.conf` | 每行一条完整的 `git clone` 命令。 |
 | `h28k-imagebuilder.config` | H28K 目标和 ImageBuilder 构建配置。 |
-| `h28k-firmware.packages` | `v25.12.x` 固件 ImageBuilder 软件包配置。 |
+| `immortalwrt-25.12.config` | `v25.12.x` 固件 ImageBuilder 软件包配置。 |
 | `immortalwrt-24.10.config` | `v24.10.5+` 固件 ImageBuilder 软件包配置。 |
 
 ## 本地验证补丁

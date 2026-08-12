@@ -1,17 +1,18 @@
-name: 每周自动编译 HINLINK H28K 固件
+name: 每日自动编译 HINLINK H28K 固件
 
 on:
   schedule:
-    # 每周一 01:00 上海时间（UTC+8）自动编译
-    - cron: '0 17 * * 0'
+    # 每天 01:00 上海时间（UTC+8）默认编译 master
+    - cron: '0 17 * * *'
   workflow_dispatch:
     inputs:
       target_tag:
-        description: 'ImmortalWrt 版本（支持 v25.12.x 与 v24.10.5+）'
+        description: 'ImmortalWrt 版本（定时默认 master；正式版支持 v25.12.x 与 v24.10.5+）'
         required: true
-        default: 'v25.12.1'
+        default: 'master'
         type: choice
         options:
+          - master
           - v25.12.1
           - v25.12.0
           - v24.10.6
@@ -100,12 +101,20 @@ jobs:
         id: release
         run: |
           set -eu
-          RELEASE_TAG="${{ inputs.target_tag || 'v25.12.1' }}"
-          RELEASE_VERSION="${RELEASE_TAG#v}"
+          RELEASE_TAG="${{ inputs.target_tag || 'master' }}"
+          if [ "$RELEASE_TAG" = master ]; then
+            RELEASE_VERSION=master
+            PATH_TARGET=""
+            IS_SNAPSHOT=true
+          else
+            RELEASE_VERSION="${RELEASE_TAG#v}"
+            PATH_TARGET="releases/${RELEASE_VERSION}/targets/rockchip/armv8"
+            IS_SNAPSHOT=false
+          fi
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          PATH_TARGET="releases/${RELEASE_VERSION}/targets/rockchip/armv8"
           echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "path_target=$PATH_TARGET" >> "$GITHUB_OUTPUT"
+          echo "is_snapshot=$IS_SNAPSHOT" >> "$GITHUB_OUTPUT"
           echo "版本：$RELEASE_TAG"
 
       - name: 选择版本适配文件
@@ -114,18 +123,26 @@ jobs:
           set -euo pipefail
           TAG='${{ steps.release.outputs.tag }}'
           case "$TAG" in
+            master)
+              PATCH_DIR='patches-25.12'
+              FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-25.12.config'
+              SUPPORT_RANGE='master snapshot'
+              CHECK_OFFICIAL_ABI=false
+              ;;
             v25.12.*)
               PATCH_DIR='patches-25.12'
-              FIRMWARE_PACKAGES_CONFIG='config/h28k-firmware.packages'
+              FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-25.12.config'
               SUPPORT_RANGE='v25.12.x'
+              CHECK_OFFICIAL_ABI=true
               ;;
             v24.10.5|v24.10.6|v24.10.[7-9]|v24.10.[1-9][0-9]*)
               PATCH_DIR='patches-24.10.5-plus'
               FIRMWARE_PACKAGES_CONFIG='config/immortalwrt-24.10.config'
               SUPPORT_RANGE='v24.10.5+'
+              CHECK_OFFICIAL_ABI=true
               ;;
             *)
-              echo "不支持的版本：$TAG。当前仅支持 v25.12.x 与 v24.10.5+。" >&2
+              echo "不支持的版本：$TAG。当前仅支持 master、v25.12.x 与 v24.10.5+。" >&2
               exit 1
               ;;
           esac
@@ -134,12 +151,15 @@ jobs:
           echo "patch_dir=$PATCH_DIR" >> "$GITHUB_OUTPUT"
           echo "firmware_packages_config=$FIRMWARE_PACKAGES_CONFIG" >> "$GITHUB_OUTPUT"
           echo "support_range=$SUPPORT_RANGE" >> "$GITHUB_OUTPUT"
+          echo "check_official_abi=$CHECK_OFFICIAL_ABI" >> "$GITHUB_OUTPUT"
           echo "补丁目录：$PATCH_DIR"
           echo "固件包配置：$FIRMWARE_PACKAGES_CONFIG"
           echo "支持范围：$SUPPORT_RANGE"
+          echo "官方 ABI 校验：$CHECK_OFFICIAL_ABI"
 
       - name: 选择镜像源
         id: mirror
+        if: ${{ steps.release.outputs.is_snapshot != 'true' }}
         run: |
           set -eu
           PATH_TARGET='${{ steps.release.outputs.path_target }}'
@@ -175,7 +195,7 @@ jobs:
 
       - name: 克隆指定版本源码
         run: |
-          git clone --branch "${{ steps.release.outputs.tag }}" --single-branch --depth=1 \
+          git clone --branch "${{ steps.release.outputs.tag }}" --depth=1 \
             https://github.com/immortalwrt/immortalwrt.git source
           echo "克隆完成，磁盘："
           df -h / | tail -1
@@ -204,11 +224,17 @@ jobs:
         working-directory: source
         run: |
           set -eu
-          curl -fsSL "${{ steps.mirror.outputs.base_url }}/feeds.buildinfo" -o feeds.conf.default
-          sha256sum feeds.conf.default > .feeds.conf.default.sha256
+          if [ '${{ steps.release.outputs.is_snapshot }}' = 'true' ]; then
+            echo 'master snapshot 使用源码仓库默认 feeds.conf.default'
+          else
+            curl -fsSL "${{ steps.mirror.outputs.base_url }}/feeds.buildinfo" -o feeds.conf.default
+            sha256sum feeds.conf.default > .feeds.conf.default.sha256
+          fi
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          sha256sum -c .feeds.conf.default.sha256
+          if [ -f .feeds.conf.default.sha256 ]; then
+            sha256sum -c .feeds.conf.default.sha256
+          fi
 
       - name: 应用纯净版构建配置
         working-directory: source
@@ -219,7 +245,7 @@ jobs:
           cat > /tmp/firmware-clean.conf <<'EOF'
           lan_ip=${{ inputs.lan_ip || '192.168.100.1' }}
           password=${{ inputs.root_password || 'password' }}
-          check_official_abi=true
+          check_official_abi=${{ steps.compat.outputs.check_official_abi }}
           EOF
           bash "$GITHUB_WORKSPACE/scripts/build_config.sh" prepare \
             . \
@@ -233,19 +259,26 @@ jobs:
           IMMORTALWRT_BASE_URL: ${{ steps.mirror.outputs.base_url }}
         run: |
           set -eu
-          BUILDINFO_URL='${{ steps.mirror.outputs.base_url }}'
-          curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
+          if [ '${{ steps.release.outputs.is_snapshot }}' = 'true' ]; then
+            cat > .config.official <<'EOF'
+          CONFIG_ALL_KMODS=y
+          CONFIG_DEVEL=y
+          EOF
+          else
+            BUILDINFO_URL='${{ steps.mirror.outputs.base_url }}'
+            curl -fsSL "$BUILDINFO_URL/config.buildinfo" -o .config.buildinfo
 
-          awk '
-            /^CONFIG_ALL_KMODS=y$/ ||
-            /^CONFIG_DEVEL=y$/ ||
-            (/^CONFIG_KERNEL_[A-Za-z0-9_]+=/ &&
-              $0 !~ /^CONFIG_KERNEL_BUILD_(DOMAIN|USER)=/) ||
-            /^# CONFIG_KERNEL_[A-Za-z0-9_]+ is not set$/
-          ' .config.buildinfo > .config.official
+            awk '
+              /^CONFIG_ALL_KMODS=y$/ ||
+              /^CONFIG_DEVEL=y$/ ||
+              (/^CONFIG_KERNEL_[A-Za-z0-9_]+=/ &&
+                $0 !~ /^CONFIG_KERNEL_BUILD_(DOMAIN|USER)=/) ||
+              /^# CONFIG_KERNEL_[A-Za-z0-9_]+ is not set$/
+            ' .config.buildinfo > .config.official
 
-          grep -q '^CONFIG_ALL_KMODS=y$' .config.official
-          grep -q '^CONFIG_DEVEL=y$' .config.official
+            grep -q '^CONFIG_ALL_KMODS=y$' .config.official
+            grep -q '^CONFIG_DEVEL=y$' .config.official
+          fi
 
           cat .config.official \
             "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" > .config
@@ -335,9 +368,9 @@ jobs:
         run: |
           set -eu
           cat > /tmp/firmware-clean.conf <<'EOF'
-          lan_ip=${{ inputs.lan_ip }}
-          password=${{ inputs.root_password }}
-          check_official_abi=true
+          lan_ip=${{ inputs.lan_ip || '192.168.100.1' }}
+          password=${{ inputs.root_password || 'password' }}
+          check_official_abi=${{ steps.compat.outputs.check_official_abi }}
           EOF
           bash "$GITHUB_WORKSPACE/scripts/build_config.sh" check-abi \
             . \
