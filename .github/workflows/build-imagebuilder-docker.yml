@@ -296,14 +296,22 @@ jobs:
         run: |
           set -o pipefail
           echo "=== Build started: $(date) ==="
+
+          set +e
           make -j"$(nproc)" 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
+          set -e
+
           if [ "$code" -ne 0 ]; then
             echo '=== Parallel build failed, retry with -j1 V=s ==='
+
+            set +e
             make -j1 V=s 2>&1 | tee build-single.log
             code=${PIPESTATUS[0]}
-            echo "=== package/libs/toolchain related log tail ==="
-            grep -nE 'package/libs/toolchain|ERROR:|error:|undefined reference|No such file|not found|failed' build-single.log | tail -200 || true
+            set -e
+
+            echo "=== arm-trusted-firmware-rockchip related log tail ==="
+            grep -nE 'arm-trusted-firmware-rockchip|rk3528|ERROR:|error:|undefined reference|No such file|not found|failed' build-single.log | tail -300 || true
             exit "$code"
           fi
           echo "=== Build finished: $(date) ==="
@@ -516,14 +524,3 @@ jobs:
           name: h28k-imagebuilder-${{ steps.release.outputs.tag }}-${{ steps.abi.outputs.abi || steps.prebuilt.outputs.abi }}
           path: source/${{ steps.ib.outputs.ib_tar }}
           retention-days: 14
-
-      - name: 上传失败编译日志
-        if: failure() && inputs.prebuilt_imagebuilder_url == ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: imagebuilder-build-failed-${{ steps.release.outputs.tag }}
-          path: |
-            source/build.log
-            source/build-single.log
-          if-no-files-found: ignore
-          retention-days: 7

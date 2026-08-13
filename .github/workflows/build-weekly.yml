@@ -333,19 +333,28 @@ jobs:
         working-directory: source
         timeout-minutes: 300
         run: |
+          set -o pipefail
+
           echo "开始构建：$(date)"
           echo "阶段 1：并行编译 (-j$(nproc))"
           
           # 1. 执行多线程全力编译并记录输出
+          set +e
           make -j"$(nproc)" 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
+          set -e
 
           # 2. 判断多线程结果，失败则自动切换为单线程排查
           if [ "$code" -ne 0 ]; then
             echo "阶段 1 失败，阶段 2：单线程详细模式 (-j1 V=s)"
             
+            set +e
             make -j1 V=s 2>&1 | tee build_singlethread.log
             code=${PIPESTATUS[0]}
+            set -e
+
+            echo "=== arm-trusted-firmware-rockchip 相关日志 ==="
+            grep -nE 'arm-trusted-firmware-rockchip|rk3528|ERROR:|error:|undefined reference|No such file|not found|failed' build_singlethread.log | tail -300 || true
             
             echo "编译失败：$(date)，退出码 $code"
             exit "$code"
@@ -383,7 +392,7 @@ jobs:
           shopt -s nullglob
           SQUASHFS_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*squashfs*sysupgrade.img.gz)
           EXT4_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k*ext4*sysupgrade.img.gz)
-          LXC_FILES=(bin/targets/rockchip/armv8/*rootfs.tar.gz)
+          LXC_FILES=(bin/targets/rockchip/armv8/*hinlink_h28k-rootfs.tar.gz)
           if [ "${#SQUASHFS_FILES[@]}" -eq 0 ]; then
             echo "未找到 HINLINK H28K squashfs sysupgrade 固件"
             ls -lh bin/targets/rockchip/armv8/ 2>/dev/null || true
@@ -413,7 +422,7 @@ jobs:
           name: HINLINK-H28K-source-${{ env.RELEASE_TAG }}-${{ env.KERNEL_ABI }}-${{ env.ROOTFS_PARTSIZE_LABEL }}
           path: |
             source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
-            source/bin/targets/rockchip/armv8/*rootfs.tar.gz
+            source/bin/targets/rockchip/armv8/*hinlink_h28k-rootfs.tar.gz
           retention-days: 14
 
       - name: 生成编译总结
@@ -461,19 +470,8 @@ jobs:
           body_path: ${{ steps.summary.outputs.body }}
           files: |
             source/bin/targets/rockchip/armv8/*hinlink_h28k*sysupgrade.img.gz
-            source/bin/targets/rockchip/armv8/*rootfs.tar.gz
+            source/bin/targets/rockchip/armv8/*hinlink_h28k-rootfs.tar.gz
           make_latest: true
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 上传失败编译日志
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: 编译失败日志
-          path: |
-            source/build.log
-            source/build_singlethread.log
-          if-no-files-found: ignore
-          retention-days: 7

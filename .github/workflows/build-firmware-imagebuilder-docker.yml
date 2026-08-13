@@ -458,6 +458,7 @@ jobs:
             mkdir -p /output
             cp -av bin/targets/rockchip/armv8/*hinlink*h28k* /output/ || true
             cp -av bin/targets/rockchip/armv8/*rootfs*.tar.gz /output/ || true
+            rm -f /output/*-targz-rootfs.tar.gz
             [ -f profiles.json ] && cp -av profiles.json /output/profiles.json || true
             find /output -maxdepth 1 -type f -print
           '
@@ -471,7 +472,7 @@ jobs:
           shopt -s nullglob
           squashfs=(output/*hinlink*h28k*squashfs*sysupgrade.img.gz output/*hinlink_h28k*squashfs*sysupgrade.img.gz)
           ext4=(output/*hinlink*h28k*ext4*sysupgrade.img.gz output/*hinlink_h28k*ext4*sysupgrade.img.gz)
-          lxc=(output/*rootfs.tar.gz)
+          lxc=(output/*hinlink_h28k-rootfs.tar.gz)
           if [ "${#squashfs[@]}" -eq 0 ]; then
             echo '未找到 H28K squashfs sysupgrade 固件' >&2
             exit 1
