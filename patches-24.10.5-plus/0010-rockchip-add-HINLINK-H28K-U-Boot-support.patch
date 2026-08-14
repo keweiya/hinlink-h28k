@@ -54,9 +54,9 @@ index c86e2a4700..27433ea416 100644
 +  TPL:=$(RK3528_TPL)
 +endef
 +
-+define U-Boot/hinlink-h28k-rk3528
++define U-Boot/generic-rk3528
 +  $(U-Boot/rk3528/Default)
-+  NAME:=HINLINK H28K
++  NAME:=GENERIC RK3528
 +  BUILD_DEVICES:= \
 +    hinlink_h28k
 +endef
@@ -69,7 +69,7 @@ index c86e2a4700..27433ea416 100644
    roc-cc-rk3328 \
    rock64-rk3328 \
    rock-pi-e-rk3328 \
-+  hinlink-h28k-rk3528 \
++  generic-rk3528 \
    nanopi-r3s-rk3566 \
    radxa-cm3-io-rk3566 \
    radxa-zero-3-rk3566 \
@@ -374,11 +374,11 @@ index 0000000000..e387da51fc
 +	pinctrl-0 = <&uart0m0_xfer>;
 +	status = "okay";
 +};
-diff --git a/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig b/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig
+diff --git a/package/boot/uboot-rockchip/src/configs/generic-rk3528_defconfig b/package/boot/uboot-rockchip/src/configs/generic-rk3528_defconfig
 new file mode 100644
 index 0000000000..012dc7796d
 --- /dev/null
-+++ b/package/boot/uboot-rockchip/src/configs/hinlink-h28k-rk3528_defconfig
++++ b/package/boot/uboot-rockchip/src/configs/generic-rk3528_defconfig
 @@ -0,0 +1,65 @@
 +CONFIG_ARM=y
 +CONFIG_SKIP_LOWLEVEL_INIT=y

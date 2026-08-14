@@ -12,7 +12,7 @@ index f322d35fb0..1d014eb850 100644
 +  SOC := rk3528
 +  KERNEL_LOADADDR := 0x03000000
 +  DEVICE_DTS := rockchip/rk3528-hinlink-h28k
-+  UBOOT_DEVICE_NAME := hinlink-h28k-rk3528
++  UBOOT_DEVICE_NAME := generic-rk3528
 +  BOOT_FLOW := pine64-img
 +  DEVICE_PACKAGES := kmod-input-adc-keys kmod-saradc-rockchip kmod-r8169
 +endef

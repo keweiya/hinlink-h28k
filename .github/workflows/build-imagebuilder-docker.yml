@@ -241,9 +241,30 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL '${{ steps.mirror.outputs.base_url }}/config.buildinfo' -o .config.buildinfo
-          # 从官方 config.buildinfo 开始，仅追加本仓库维护的 H28K/ImageBuilder 配置。
+          # 从官方 config.buildinfo 开始，保留官方 kernel/buildbot 相关配置，
+          # 但裁剪 ALL_KMODS/SDK/ALL_PROFILES 等全量构建选项，避免在 GitHub Actions
+          # 上把官方 buildbot 的所有 kmod、SDK、全部设备 profile 都重新编译一遍。
           cp .config.buildinfo .config.official
-          cat .config.official "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" > .config
+          cp .config.official .config
+
+          ./scripts/config --file .config -d ALL_KMODS
+          ./scripts/config --file .config -d ALL_NONSHARED
+          ./scripts/config --file .config -d ALL
+          ./scripts/config --file .config -d SDK
+          ./scripts/config --file .config -d SDK_LLVM_BPF
+          ./scripts/config --file .config -d MAKE_TOOLCHAIN
+          ./scripts/config --file .config -d TARGET_ALL_PROFILES
+          ./scripts/config --file .config -d TARGET_MULTI_PROFILE
+
+          ./scripts/config --file .config -e IB
+          ./scripts/config --file .config -e TARGET_rockchip
+          ./scripts/config --file .config -e TARGET_rockchip_armv8
+          ./scripts/config --file .config -e TARGET_PER_DEVICE_ROOTFS
+          ./scripts/config --file .config -e TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink_h28k
+          ./scripts/config --file .config -s TARGET_DEVICE_PACKAGES_rockchip_armv8_DEVICE_hinlink_h28k ""
+          ./scripts/config --file .config -e TARGET_rockchip_armv8_DEVICE_hinlink_h28k || true
+
+          cat "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" >> .config
           make defconfig
 
           if ! grep -Eq 'CONFIG_TARGET(_DEVICE)?_rockchip_armv8_DEVICE_hinlink_h28k=y' .config; then
@@ -273,7 +294,7 @@ jobs:
           fi
 
           echo '=== Final buildbot/kernel/IB config summary ==='
-          grep -E '^(CONFIG_ALL_KMODS|CONFIG_ALL_NONSHARED|CONFIG_DEVEL|CONFIG_BUILDBOT|CONFIG_IB|CONFIG_SDK|CONFIG_TARGET_ALL_PROFILES|CONFIG_TARGET_PER_DEVICE_ROOTFS|CONFIG_KERNEL_BUILD_USER|CONFIG_KERNEL_BUILD_DOMAIN|CONFIG_VERSION_REPO)=' .config || true
+          grep -E '^(CONFIG_ALL|CONFIG_ALL_KMODS|CONFIG_ALL_NONSHARED|CONFIG_DEVEL|CONFIG_BUILDBOT|CONFIG_IB|CONFIG_SDK|CONFIG_MAKE_TOOLCHAIN|CONFIG_TARGET_MULTI_PROFILE|CONFIG_TARGET_ALL_PROFILES|CONFIG_TARGET_PER_DEVICE_ROOTFS|CONFIG_KERNEL_BUILD_USER|CONFIG_KERNEL_BUILD_DOMAIN|CONFIG_VERSION_REPO)=' .config || true
 
       - name: 下载源码包
         if: ${{ inputs.prebuilt_imagebuilder_url == '' }}
@@ -297,10 +318,27 @@ jobs:
           set -o pipefail
           echo "=== Build started: $(date) ==="
 
+          (
+            while true; do
+              echo "=== heartbeat: $(date) ==="
+              echo "--- disk ---"
+              df -h /
+              echo "--- memory ---"
+              free -h
+              echo "--- top cpu processes ---"
+              ps -eo pid,ppid,stat,etime,%cpu,%mem,cmd --sort=-%cpu | head -30
+              sleep 300
+            done
+          ) &
+          heartbeat_pid=$!
+
           set +e
           make -j"$(nproc)" 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
           set -e
+
+          kill "$heartbeat_pid" 2>/dev/null || true
+          wait "$heartbeat_pid" 2>/dev/null || true
 
           if [ "$code" -ne 0 ]; then
             echo '=== Parallel build failed, retry with -j1 V=s ==='
