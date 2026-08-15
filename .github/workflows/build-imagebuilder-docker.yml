@@ -247,31 +247,31 @@ jobs:
           cp .config.buildinfo .config.official
           cp .config.official .config
 
-          ./scripts/config --file .config -d ALL_KMODS
-          ./scripts/config --file .config -d ALL_NONSHARED
-          ./scripts/config --file .config -d ALL
-          ./scripts/config --file .config -d SDK
-          ./scripts/config --file .config -d SDK_LLVM_BPF
-          ./scripts/config --file .config -d MAKE_TOOLCHAIN
-          ./scripts/config --file .config -d TARGET_ALL_PROFILES
-          ./scripts/config --file .config -d TARGET_MULTI_PROFILE
+           ../scripts/config --file .config -d ALL_KMODS
+           ../scripts/config --file .config -d ALL_NONSHARED
+           ../scripts/config --file .config -d ALL
+           ../scripts/config --file .config -d SDK
+           ../scripts/config --file .config -d SDK_LLVM_BPF
+           ../scripts/config --file .config -d MAKE_TOOLCHAIN
+           ../scripts/config --file .config -d TARGET_ALL_PROFILES
+           ../scripts/config --file .config -d TARGET_MULTI_PROFILE
 
-          ./scripts/config --file .config -e IB
-          ./scripts/config --file .config -e TARGET_rockchip
-          ./scripts/config --file .config -e TARGET_rockchip_armv8
-          ./scripts/config --file .config -e TARGET_PER_DEVICE_ROOTFS
-          ./scripts/config --file .config -e TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink_h28k
-          ./scripts/config --file .config -s TARGET_DEVICE_PACKAGES_rockchip_armv8_DEVICE_hinlink_h28k ""
-          ./scripts/config --file .config -e TARGET_rockchip_armv8_DEVICE_hinlink_h28k || true
+           ../scripts/config --file .config -e IB
+           ../scripts/config --file .config -e TARGET_rockchip
+           ../scripts/config --file .config -e TARGET_rockchip_armv8
+           ../scripts/config --file .config -e TARGET_PER_DEVICE_ROOTFS
+           ../scripts/config --file .config -e TARGET_DEVICE_rockchip_armv8_DEVICE_hinlink_h28k
+           ../scripts/config --file .config -s TARGET_DEVICE_PACKAGES_rockchip_armv8_DEVICE_hinlink_h28k ""
+           ../scripts/config --file .config -e TARGET_rockchip_armv8_DEVICE_hinlink_h28k || true
 
-          cat "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" >> .config
-          make defconfig
+           cat "$GITHUB_WORKSPACE/config/h28k-imagebuilder.config" >> .config
+           ../make defconfig
 
-          if ! grep -Eq 'CONFIG_TARGET(_DEVICE)?_rockchip_armv8_DEVICE_hinlink_h28k=y' .config; then
-            echo 'H28K profile was not enabled after first defconfig, retrying with legacy symbol...' >&2
-            printf '\nCONFIG_TARGET_rockchip_armv8_DEVICE_hinlink_h28k=y\n' >> .config
-            make defconfig
-          fi
+           if ! grep -Eq 'CONFIG_TARGET(_DEVICE)?_rockchip_armv8_DEVICE_hinlink_h28k=y' .config; then
+             echo 'H28K profile was not enabled after first defconfig, retrying with legacy symbol...' >&2
+             printf '\nCONFIG_TARGET_rockchip_armv8_DEVICE_hinlink_h28k=y\n' >> .config
+             ../make defconfig
+           fi
 
           echo '=== H28K target symbols ==='
           grep -E 'CONFIG_TARGET.*hinlink.*h28k' .config || {
